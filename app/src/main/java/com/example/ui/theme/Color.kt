@@ -2,10 +2,17 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
+// Premium Obsidian Space Dark Palette
+val SpaceBlack = Color(0xFF090710)
+val DeepVioletSurface = Color(0xFF141026)
+val ActiveCardBg = Color(0xFF1F1A3A)
+val SurfaceVariantDark = Color(0xFF28224C)
 
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
+// Glowing neon accent colors
+val ElectricPurple = Color(0xFFBB86FC)
+val NeonTurquoise = Color(0xFF03DAC6)
+val CyberPink = Color(0xFFFF529E)
+
+val OnBackgroundLight = Color(0xFFE7E5F1)
+val OnSurfaceLight = Color(0xFFE7E5F1)
+val TextSecondary = Color(0xFFABA4CE)

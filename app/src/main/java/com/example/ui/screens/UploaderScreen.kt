@@ -21,8 +21,7 @@ import java.util.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UploaderScreen(
-    viewModel: CallSyncViewModel,
-    onNavigateToLogs: () -> Unit
+    viewModel: CallSyncViewModel
 ) {
     val uploads by viewModel.uploads.collectAsState()
     val isServiceActive by viewModel.isServiceActive.collectAsState()
@@ -249,32 +248,16 @@ fun UploaderScreen(
             Text("Synchroniser maintenant")
         }
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Button(
+            onClick = { viewModel.testConnection() },
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("test_connection_button"),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary, contentColor = MaterialTheme.colorScheme.onSecondary)
         ) {
-            Button(
-                onClick = { viewModel.testConnection() },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("test_connection_button")
-            ) {
-                Icon(Icons.Default.Power, contentDescription = "Test Connection")
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Tester connexion")
-            }
-
-            Button(
-                onClick = onNavigateToLogs,
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("navigate_to_logs_button"),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
-            ) {
-                Icon(Icons.Default.Notes, contentDescription = "Logs")
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("Journaux logs")
-            }
+            Icon(Icons.Default.CloudSync, contentDescription = "Test Connection")
+            Spacer(modifier = Modifier.width(8.dp))
+            Text("Tester la connexion au serveur")
         }
 
         // Service Start / Stop Toggle Card

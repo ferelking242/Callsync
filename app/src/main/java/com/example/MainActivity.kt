@@ -16,6 +16,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import com.example.service.CallUploadService
 import com.example.ui.screens.MainScreen
@@ -53,13 +56,24 @@ class MainActivity : ComponentActivity() {
             sandboxDir.mkdirs()
         }
 
+        val onboardingCompleted = viewModel.repository.isOnboardingCompleted()
+
         setContent {
             MyApplicationTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    MainScreen(viewModel = viewModel)
+                    var showOnboarding by remember { androidx.compose.runtime.mutableStateOf(!onboardingCompleted) }
+
+                    if (showOnboarding) {
+                        com.example.ui.screens.OnboardingScreen(
+                            viewModel = viewModel,
+                            onComplete = { showOnboarding = false }
+                        )
+                    } else {
+                        MainScreen(viewModel = viewModel)
+                    }
                 }
             }
         }

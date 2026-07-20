@@ -87,6 +87,14 @@ class CallSyncRepository(private val context: Context) {
         prefs.edit().putString("monitor_folder", path).apply()
     }
 
+    fun isOnboardingCompleted(): Boolean {
+        return prefs.getBoolean("onboarding_completed", false)
+    }
+
+    fun setOnboardingCompleted(completed: Boolean) {
+        prefs.edit().putBoolean("onboarding_completed", completed).apply()
+    }
+
     // Dynamic Retrofit API Builder
     @Volatile
     private var cachedApi: CallSyncApi? = null

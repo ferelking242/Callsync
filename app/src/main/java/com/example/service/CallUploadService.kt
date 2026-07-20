@@ -103,6 +103,13 @@ class CallUploadService : Service() {
     }
 
     private suspend fun handleNewFile(file: File) {
+        val ext = file.extension.lowercase()
+        val supportedExtensions = listOf("mp3", "m4a", "wav", "amr", "3gp", "ogg")
+        if (!supportedExtensions.contains(ext)) {
+            repository.addLog("Uploader", "Skipping non-audio file detected: ${file.name}")
+            return
+        }
+
         repository.addLog("Uploader", "New file detected: ${file.name}. Waiting for write completion...")
         
         // Wait 4 seconds to allow writer to write some data

@@ -54,13 +54,6 @@ fun MainScreen(viewModel: CallSyncViewModel) {
                     label = { Text("Viewer") },
                     modifier = Modifier.testTag("tab_viewer")
                 )
-                NavigationBarItem(
-                    selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
-                    icon = { Icon(Icons.Default.List, contentDescription = "Logs") },
-                    label = { Text("Logs") },
-                    modifier = Modifier.testTag("tab_logs")
-                )
             }
         }
     ) { innerPadding ->
@@ -71,13 +64,9 @@ fun MainScreen(viewModel: CallSyncViewModel) {
         ) {
             when (selectedTab) {
                 0 -> UploaderScreen(
-                    viewModel = viewModel,
-                    onNavigateToLogs = { selectedTab = 2 }
-                )
-                1 -> ViewerScreen(
                     viewModel = viewModel
                 )
-                2 -> LogsScreen(
+                1 -> ViewerScreen(
                     viewModel = viewModel
                 )
             }
