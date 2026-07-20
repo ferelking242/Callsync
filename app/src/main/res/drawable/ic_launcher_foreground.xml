@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Outer Ring Accent -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#7E57C2"
+        android:strokeWidth="1.5"
+        android:pathData="M 54 18 A 36 36 0 1 1 53.99 18 Z" />
+
+    <!-- Sound Wave Silhouette in Center -->
+    <path
+        android:fillColor="#BB86FC"
+        android:pathData="M 42 46 h 4 v 16 h -4 z M 48 38 h 4 v 32 h -4 z M 54 30 h 4 v 48 h -4 z M 60 42 h 4 v 24 h -4 z M 66 46 h 4 v 16 h -4 z" />
+
+    <!-- Synchronizing Cloud Icon at Bottom Right of wave -->
+    <path
+        android:fillColor="#03DAC6"
+        android:pathData="M 76 68 c 0.55 0 1 -0.45 1 -1 c 0 -3.31 -2.69 -6 -6 -6 c -0.7 0 -1.37 0.13 -2 0.35 c -1.18 -2.01 -3.39 -3.35 -5.92 -3.35 c -3.42 0 -6.24 2.5 -6.74 5.75 c -0.52 -0.16 -1.07 -0.25 -1.64 -0.25 c -2.93 0 -5.33 2.14 -5.71 4.94 C 50.12 68.32 50.55 69 51.24 69 h 23.76 c 0.55 0 1 -0.45 1 -1 z" />
+</vector>
