@@ -184,7 +184,7 @@ class CallSyncRepository(private val context: Context) {
             val file = File(upload.path)
             if (!file.exists()) {
                 addLog("Uploader", "File missing, marking failed: ${upload.name}", true)
-                uploadDao.updateUploadStatus(upload.id, "FAILED")
+                uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = "File not found on disk"))
                 continue
             }
             try {
