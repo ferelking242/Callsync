@@ -353,7 +353,7 @@ fun SlidePermissions(
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 8.dp, bottom = 4.dp)
+            modifier = Modifier.padding(start = 8.dp, end = 8.dp, bottom = 4.dp)
         )
 
         PermissionItemCard(

@@ -56,7 +56,7 @@ class CallSyncRepository(private val context: Context) {
     // ── Settings ──────────────────────────────────────────────────────────────
 
     fun getServerUrl(): String {
-        var url = prefs.getString("server_url", "http://10.0.2.2:8080/") ?: "http://10.0.2.2:8080/"
+        var url = prefs.getString("server_url", "https://sarcastic-wiry-lava--havek99178.replit.app/") ?: "https://sarcastic-wiry-lava--havek99178.replit.app/"
         if (!url.endsWith("/")) url += "/"
         return url
     }
