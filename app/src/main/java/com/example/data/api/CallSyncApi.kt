@@ -1,5 +1,7 @@
 package com.example.data.api
 
+import com.squareup.moshi.Json
+import com.squareup.moshi.JsonClass
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
 import okhttp3.ResponseBody
@@ -14,31 +16,36 @@ import retrofit2.http.Part
 import retrofit2.http.Path
 
 // Models
+@JsonClass(generateAdapter = true)
 data class LoginRequest(
     val username: String,
     val password: String
 )
 
+@JsonClass(generateAdapter = true)
 data class LoginResponse(
     val token: String
 )
 
+@JsonClass(generateAdapter = true)
 data class RecordingResponse(
     val id: Long,
     val name: String,
     val size: Long,
     val sha256: String,
     val duration: Double,
-    val uploadDate: String,
-    val creationDate: String,
+    @Json(name = "upload_date") val uploadDate: String,
+    @Json(name = "creation_date") val creationDate: String,
     val path: String,
-    val deviceId: String
+    @Json(name = "device_id") val deviceId: String
 )
 
+@JsonClass(generateAdapter = true)
 data class HealthResponse(
     val status: String,
-    val time: String,
-    val version: String
+    val version: String? = null,
+    val time: String? = null,
+    val app: String? = null
 )
 
 interface CallSyncApi {

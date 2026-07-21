@@ -27,7 +27,10 @@ interface UploadDao {
     @Query("SELECT * FROM uploads WHERE path = :path LIMIT 1")
     suspend fun getUploadByPath(path: String): Upload?
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Query("SELECT * FROM uploads WHERE status = 'UPLOADING' ORDER BY id ASC")
+    suspend fun getUploadingUploads(): List<Upload>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertUpload(upload: Upload): Long
 
     @Update
@@ -52,7 +55,7 @@ interface LogDao {
     suspend fun clearAllLogs()
 }
 
-@Database(entities = [Upload::class, LogEntry::class], version = 1, exportSchema = false)
+@Database(entities = [Upload::class, LogEntry::class], version = 2, exportSchema = false)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun uploadDao(): UploadDao
     abstract fun logDao(): LogDao

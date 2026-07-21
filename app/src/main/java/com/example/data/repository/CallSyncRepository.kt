@@ -370,10 +370,11 @@ class CallSyncRepository(private val context: Context) {
     suspend fun clearLogs() = withContext(Dispatchers.IO) { logDao.clearAllLogs() }
     suspend fun clearUploads() = withContext(Dispatchers.IO) { uploadDao.clearAllUploads() }
 
-    /** Reset any stuck UPLOADING → PENDING (e.g. after crash) */
+    /** Reset any stuck UPLOADING → PENDING (e.g. after crash or forced close) */
     suspend fun resetStuckUploads() = withContext(Dispatchers.IO) {
-        val stuck = uploadDao.getPendingUploads().filter { it.status == "UPLOADING" }
-        stuck.forEach { uploadDao.updateUpload(it.copy(status = "PENDING")) }
+        val stuck = uploadDao.getUploadingUploads()
+        stuck.forEach { uploadDao.updateUpload(it.copy(status = "PENDING", errorMessage = null)) }
+        if (stuck.isNotEmpty()) addLog("Uploader", "Reset ${stuck.size} stuck upload(s) → PENDING")
     }
 
     suspend fun retryFailedUploads() = withContext(Dispatchers.IO) {
