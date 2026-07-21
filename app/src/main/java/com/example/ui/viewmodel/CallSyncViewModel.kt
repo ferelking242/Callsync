@@ -1,7 +1,6 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
-import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
@@ -33,32 +32,50 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     private val context = application.applicationContext
     val repository = CallSyncRepository(context)
 
-    // Flows from DB
+    // ── DB flows ──────────────────────────────────────────────────────────────
     val uploads: StateFlow<List<Upload>> = repository.allUploads
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val logs: StateFlow<List<LogEntry>> = repository.allLogs
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Foreground service status
+    // ── Service state ─────────────────────────────────────────────────────────
     val isServiceActive: StateFlow<Boolean> = CallUploadService.isRunning
     val lastUploadTime: StateFlow<Long?> = CallUploadService.lastUploadTime
 
-    // Server connection test states
+    // ── Connection states ─────────────────────────────────────────────────────
     private val _isConnecting = MutableStateFlow(false)
     val isConnecting: StateFlow<Boolean> = _isConnecting
 
+    /** null = not tested yet, true = ok, false = error */
     private val _isConnectionSuccessful = MutableStateFlow<Boolean?>(null)
     val isConnectionSuccessful: StateFlow<Boolean?> = _isConnectionSuccessful
 
-    // Server Records (Viewer)
+    private val _connectionError = MutableStateFlow("")
+    val connectionError: StateFlow<String> = _connectionError
+
+    // ── Viewer records ────────────────────────────────────────────────────────
     private val _serverRecords = MutableStateFlow<List<RecordingResponse>>(emptyList())
     val serverRecords: StateFlow<List<RecordingResponse>> = _serverRecords
 
     private val _isRecordsLoading = MutableStateFlow(false)
     val isRecordsLoading: StateFlow<Boolean> = _isRecordsLoading
 
-    // Player States
+    private val _recordsError = MutableStateFlow("")
+    val recordsError: StateFlow<String> = _recordsError
+
+    // ── Delete state ──────────────────────────────────────────────────────────
+    private val _deletingId = MutableStateFlow<Long?>(null)
+    val deletingId: StateFlow<Long?> = _deletingId
+
+    private val _deleteError = MutableStateFlow("")
+    val deleteError: StateFlow<String> = _deleteError
+
+    // ── Sandbox ───────────────────────────────────────────────────────────────
+    private val _sandboxStatus = MutableStateFlow("")
+    val sandboxStatus: StateFlow<String> = _sandboxStatus
+
+    // ── Player ────────────────────────────────────────────────────────────────
     private var exoPlayer: ExoPlayer? = null
 
     private val _currentPlayingRecord = MutableStateFlow<RecordingResponse?>(null)
@@ -73,232 +90,245 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     private val _playbackDuration = MutableStateFlow(0L)
     val playbackDuration: StateFlow<Long> = _playbackDuration
 
-    // Settings States
-    val serverUrl = MutableStateFlow(repository.getServerUrl())
-    val username = MutableStateFlow(repository.getUsername())
-    val password = MutableStateFlow(repository.getPassword())
+    // ── Settings ──────────────────────────────────────────────────────────────
+    val serverUrl   = MutableStateFlow(repository.getServerUrl())
+    val username    = MutableStateFlow(repository.getUsername())
+    val password    = MutableStateFlow(repository.getPassword())
     val monitorFolder = MutableStateFlow(repository.getMonitorFolderPath())
 
     private var playbackProgressJob: Job? = null
 
     init {
         initPlayer()
-        // Start background progress tracking for media player
         startPlaybackProgressTracker()
-        // Attempt initial fetch if authenticated
+        // Reset any stuck uploads from a previous crash
+        viewModelScope.launch {
+            repository.resetStuckUploads()
+        }
+        // Auto-start service and index files immediately
+        startService()
+        // Fetch server records if already authenticated
         if (repository.getAuthToken().isNotEmpty()) {
             fetchServerRecords()
         }
     }
 
-    private fun initPlayer() {
-        if (exoPlayer == null) {
-            exoPlayer = ExoPlayer.Builder(context).build().apply {
-                addListener(object : Player.Listener {
-                    override fun onPlaybackStateChanged(state: Int) {
-                        _isPlaying.value = playWhenReady && state == Player.STATE_READY
-                        if (state == Player.STATE_ENDED) {
-                            _isPlaying.value = false
-                            _playbackPosition.value = 0
-                        }
-                        _playbackDuration.value = duration.coerceAtLeast(0L)
-                    }
-
-                    override fun onIsPlayingChanged(playing: Boolean) {
-                        _isPlaying.value = playing
-                    }
-                })
-            }
-        }
-    }
-
-    private fun startPlaybackProgressTracker() {
-        playbackProgressJob?.cancel()
-        playbackProgressJob = viewModelScope.launch {
-            while (true) {
-                exoPlayer?.let { player ->
-                    if (player.isPlaying) {
-                        _playbackPosition.value = player.currentPosition
-                        _playbackDuration.value = player.duration.coerceAtLeast(0L)
-                    }
-                }
-                delay(250)
-            }
-        }
-    }
+    // ── Service control ───────────────────────────────────────────────────────
 
     fun startService() {
         val intent = Intent(context, CallUploadService::class.java)
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-            viewModelScope.launch {
-                repository.addLog("Service", "Service manual start requested.")
-            }
-        } catch (e: Exception) {
-            viewModelScope.launch {
-                repository.addLog("Service", "Failed to start service: ${e.message}", true)
-            }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(intent)
+        } else {
+            context.startService(intent)
         }
     }
 
-    fun stopService() {
-        val intent = Intent(context, CallUploadService::class.java)
-        context.stopService(intent)
-        viewModelScope.launch {
-            repository.addLog("Service", "Service manual stop requested.")
-        }
-    }
+    // ── Connection / Auth ─────────────────────────────────────────────────────
 
     fun testConnection() {
         viewModelScope.launch {
             _isConnecting.value = true
             _isConnectionSuccessful.value = null
-            repository.addLog("API", "Testing connection...")
+            _connectionError.value = ""
 
-            val isHealthy = repository.checkServerHealth()
-            if (isHealthy) {
-                _isConnectionSuccessful.value = true
-                repository.addLog("API", "Connection check passed.")
-            } else {
-                // Try logging in as fallback
-                repository.addLog("API", "Health check failed. Retrying with login...")
-                val isAuth = repository.authenticate()
-                if (isAuth) {
-                    _isConnectionSuccessful.value = true
-                    repository.addLog("API", "Connection and Login authentication verified.")
-                } else {
-                    _isConnectionSuccessful.value = false
-                    repository.addLog("API", "Connection check and Authentication failed.", true)
-                }
+            // Step 1: check reachability
+            val (reachable, reachErr) = repository.testConnection()
+            if (!reachable) {
+                _isConnectionSuccessful.value = false
+                _connectionError.value = reachErr
+                _isConnecting.value = false
+                return@launch
             }
+
+            // Step 2: authenticate
+            val (authed, authErr) = repository.login()
+            _isConnectionSuccessful.value = authed
+            _connectionError.value = if (authed) "" else authErr
             _isConnecting.value = false
+
+            if (authed) fetchServerRecords()
         }
     }
 
-    fun triggerManualScan() {
-        viewModelScope.launch {
-            repository.addLog("Uploader", "Manual synchronisation triggered.")
-            val added = repository.scanFolderManually()
-            if (added > 0) {
-                repository.addLog("Uploader", "Discovered $added new file(s) during manual sync.")
-            } else {
-                repository.addLog("Uploader", "No new call recordings found during manual sync.")
-            }
-            // Trigger service to start uploading immediately if it is running
-            val serviceIntent = Intent(context, CallUploadService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent)
-            } else {
-                context.startService(serviceIntent)
-            }
-        }
-    }
-
-    fun saveSettings(url: String, user: String, pass: String, folder: String) {
-        serverUrl.value = url
-        username.value = user
-        password.value = pass
-        monitorFolder.value = folder
-
-        repository.setServerUrl(url)
-        repository.setUsername(user)
-        repository.setPassword(pass)
-        repository.setMonitorFolderPath(folder)
-
-        viewModelScope.launch {
-            repository.addLog("Settings", "Settings updated successfully.")
-            // Re-auth with new settings
-            testConnection()
-        }
-    }
+    // ── Server records ────────────────────────────────────────────────────────
 
     fun fetchServerRecords() {
         viewModelScope.launch {
             _isRecordsLoading.value = true
-            repository.addLog("Viewer", "Retrieving server records...")
-            val records = repository.getServerRecords()
-            if (records != null) {
-                _serverRecords.value = records
-                repository.addLog("Viewer", "Retrieved ${records.size} recording(s) from server.")
-            } else {
-                repository.addLog("Viewer", "Failed to load records from server.", true)
-            }
+            _recordsError.value = ""
+            val (records, error) = repository.getServerRecords()
+            _serverRecords.value = records
+            _recordsError.value = error
             _isRecordsLoading.value = false
         }
     }
 
-    fun deleteRecording(record: RecordingResponse) {
+    fun deleteServerRecord(id: Long) {
         viewModelScope.launch {
-            repository.addLog("Viewer", "Deleting recording: ${record.name}")
-            val success = repository.deleteServerRecord(record.id)
-            if (success) {
-                repository.addLog("Viewer", "Successfully deleted record: ${record.name}")
-                if (_currentPlayingRecord.value?.id == record.id) {
-                    stopPlayback()
+            _deletingId.value = id
+            _deleteError.value = ""
+            val (ok, err) = repository.deleteRecord(id)
+            _deletingId.value = null
+            if (ok) {
+                _serverRecords.value = _serverRecords.value.filter { it.id != id }
+            } else {
+                _deleteError.value = err
+            }
+        }
+    }
+
+    // ── Settings ──────────────────────────────────────────────────────────────
+
+    fun saveSettings(url: String, user: String, pass: String, folder: String) {
+        repository.setServerUrl(url)
+        repository.setUsername(user)
+        repository.setPassword(pass)
+        repository.setMonitorFolderPath(folder)
+        repository.setAuthToken("") // force re-login with new credentials
+
+        serverUrl.value = repository.getServerUrl()
+        username.value = user
+        password.value = pass
+        monitorFolder.value = folder
+
+        // Reset connection state after settings change
+        _isConnectionSuccessful.value = null
+        _connectionError.value = ""
+    }
+
+    // ── Sandbox ───────────────────────────────────────────────────────────────
+
+    fun generateDummyCallRecording() {
+        viewModelScope.launch {
+            _sandboxStatus.value = "Génération…"
+            val folderPath = repository.getMonitorFolderPath()
+            val folder = File(folderPath)
+
+            withContext(Dispatchers.IO) {
+                folder.mkdirs()
+                val timestamp = System.currentTimeMillis()
+                val file = File(folder, "Test_Call_${timestamp}.m4a")
+
+                // Write a minimal valid M4A header so it's recognized as audio
+                FileOutputStream(file).use { fos ->
+                    // ftyp box — marks this as an M4A/MP4 file
+                    val ftyp = byteArrayOf(
+                        0,0,0,32,  // box size = 32
+                        0x66,0x74,0x79,0x70, // 'ftyp'
+                        0x4D,0x34,0x41,0x20, // 'M4A '
+                        0,0,0,0,             // minor version
+                        0x4D,0x34,0x41,0x20, // 'M4A '
+                        0x6D,0x70,0x34,0x32, // 'mp42'
+                        0x69,0x73,0x6F,0x6D, // 'isom'
+                        0x00,0x00,0x00,0x00  // padding
+                    )
+                    fos.write(ftyp)
+                    // Pad to make a non-zero file
+                    fos.write(ByteArray(1024) { (it % 256).toByte() })
                 }
-                fetchServerRecords()
-            } else {
-                repository.addLog("Viewer", "Failed to delete record ${record.name}", true)
+                repository.addLog("Sandbox", "Created test file: ${file.name}")
             }
+
+            // Trigger immediate scan so it gets queued
+            val found = repository.scanFolderManually()
+            _sandboxStatus.value = if (found > 0) "✓ Fichier créé et détecté — upload en cours" else "Fichier créé (déjà indexé)"
+
+            // Kick off upload
+            startService()
+
+            delay(3000)
+            _sandboxStatus.value = ""
         }
     }
 
-    // Audio Playback
-    fun playRecording(record: RecordingResponse) {
-        initPlayer()
-        val token = repository.getAuthToken()
-        val baseUrl = repository.getServerUrl()
-        val streamUrl = "${baseUrl}stream/${record.id}"
+    // ── Upload controls ───────────────────────────────────────────────────────
 
+    fun scanNow() {
         viewModelScope.launch {
-            repository.addLog("Viewer", "Streaming audio for: ${record.name} - URL: $streamUrl")
+            val n = repository.scanFolderManually()
+            repository.addLog("Scanner", "Manual scan: $n new file(s)")
+            startService()
         }
+    }
 
-        try {
+    fun retryFailed() {
+        viewModelScope.launch {
+            repository.retryFailedUploads()
+            startService()
+        }
+    }
+
+    fun clearAllLogs() {
+        viewModelScope.launch { repository.clearLogs() }
+    }
+
+    fun clearAllUploads() {
+        viewModelScope.launch { repository.clearUploads() }
+    }
+
+    // ── Player ────────────────────────────────────────────────────────────────
+
+    private fun initPlayer() {
+        exoPlayer = ExoPlayer.Builder(context).build().apply {
+            addListener(object : Player.Listener {
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == Player.STATE_ENDED) {
+                        _isPlaying.value = false
+                        _playbackPosition.value = 0L
+                    }
+                }
+                override fun onIsPlayingChanged(playing: Boolean) {
+                    _isPlaying.value = playing
+                }
+            })
+        }
+    }
+
+    private fun startPlaybackProgressTracker() {
+        playbackProgressJob = viewModelScope.launch {
+            while (true) {
+                delay(500)
+                val player = exoPlayer ?: continue
+                if (player.isPlaying) {
+                    _playbackPosition.value = player.currentPosition
+                    _playbackDuration.value = player.duration.coerceAtLeast(0L)
+                }
+            }
+        }
+    }
+
+    fun playRecord(record: RecordingResponse) {
+        val serverUrl = repository.getServerUrl().trimEnd('/')
+        val token = repository.getAuthToken()
+        val streamUrl = "$serverUrl/stream/${record.id}"
+
+        val dataSourceFactory = DefaultHttpDataSource.Factory()
+            .setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
+
+        val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory)
+            .createMediaSource(MediaItem.fromUri(streamUrl))
+
+        exoPlayer?.let { player ->
+            player.stop()
+            player.setMediaSource(mediaSource)
+            player.prepare()
+            player.play()
             _currentPlayingRecord.value = record
-            
-            // Build ProgressiveMediaSource using custom header for JWT Authorization
-            val dataSourceFactory = DefaultHttpDataSource.Factory()
-                .setDefaultRequestProperties(mapOf("Authorization" to token))
-
-            val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory)
-                .createMediaSource(MediaItem.fromUri(streamUrl))
-
-            exoPlayer?.let { player ->
-                player.stop()
-                player.setMediaSource(mediaSource)
-                player.prepare()
-                player.playWhenReady = true
-                _isPlaying.value = true
-            }
-        } catch (e: Exception) {
-            viewModelScope.launch {
-                repository.addLog("Viewer", "Playback preparation failed: ${e.message}", true)
-            }
+            _isPlaying.value = true
+            _playbackPosition.value = 0L
         }
     }
 
-    fun togglePlayback() {
-        exoPlayer?.let { player ->
-            if (player.isPlaying) {
-                player.pause()
-                _isPlaying.value = false
-            } else {
-                player.play()
-                _isPlaying.value = true
-            }
+    fun togglePlayPause() {
+        exoPlayer?.let {
+            if (it.isPlaying) it.pause() else it.play()
         }
     }
 
-    fun seekTo(position: Long) {
-        exoPlayer?.let { player ->
-            player.seekTo(position)
-            _playbackPosition.value = position
-        }
+    fun seekTo(positionMs: Long) {
+        exoPlayer?.seekTo(positionMs)
+        _playbackPosition.value = positionMs
     }
 
     fun stopPlayback() {
@@ -307,41 +337,6 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
         _isPlaying.value = false
         _playbackPosition.value = 0L
         _playbackDuration.value = 0L
-    }
-
-    // Helper to generate a dummy local call recording for easy user testing
-    fun generateDummyCallRecording() {
-        viewModelScope.launch {
-            val folderPath = repository.getMonitorFolderPath()
-            val folder = File(folderPath)
-            if (!folder.exists()) {
-                folder.mkdirs()
-            }
-            val timestamp = System.currentTimeMillis()
-            val file = File(folder, "Call_Recording_$timestamp.mp3")
-            
-            // Write some empty dummy bytes
-            withContext(Dispatchers.IO) {
-                val outputStream = FileOutputStream(file)
-                outputStream.write("MOCK_AUDIO_DATA_FOR_TESTING_CALLSYNC_PROJECT".toByteArray())
-                outputStream.flush()
-                outputStream.close()
-            }
-            
-            repository.addLog("Uploader", "Generated sandbox dummy recording: ${file.name}")
-        }
-    }
-
-    fun clearAllLogs() {
-        viewModelScope.launch {
-            repository.clearLogs()
-        }
-    }
-
-    fun clearAllUploads() {
-        viewModelScope.launch {
-            repository.clearUploads()
-        }
     }
 
     override fun onCleared() {
