@@ -11,6 +11,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import com.example.data.api.RecordingResponse
+import com.example.data.model.DownloadedRecord
 import com.example.data.model.LogEntry
 import com.example.data.model.Upload
 import com.example.data.repository.CallSyncRepository
@@ -25,7 +26,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileOutputStream
 
 class CallSyncViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -33,67 +33,82 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     val repository = CallSyncRepository(context)
 
     // ── DB flows ──────────────────────────────────────────────────────────────
-    val uploads: StateFlow<List<Upload>> = repository.allUploads
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val uploads: StateFlow<List<Upload>> =
+        repository.allUploads.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val logs: StateFlow<List<LogEntry>> = repository.allLogs
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val logs: StateFlow<List<LogEntry>> =
+        repository.allLogs.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val downloadedRecords: StateFlow<List<DownloadedRecord>> =
+        repository.allDownloadedRecords.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // ── Service state ─────────────────────────────────────────────────────────
-    val isServiceActive: StateFlow<Boolean> = CallUploadService.isRunning
-    val lastUploadTime: StateFlow<Long?> = CallUploadService.lastUploadTime
+    val isServiceActive:  StateFlow<Boolean>  = CallUploadService.isRunning
+    val lastUploadTime:   StateFlow<Long?>    = CallUploadService.lastUploadTime
 
     // ── Connection states ─────────────────────────────────────────────────────
-    private val _isConnecting = MutableStateFlow(false)
+    private val _isConnecting            = MutableStateFlow(false)
     val isConnecting: StateFlow<Boolean> = _isConnecting
 
-    /** null = not tested yet, true = ok, false = error */
-    private val _isConnectionSuccessful = MutableStateFlow<Boolean?>(null)
+    private val _isConnectionSuccessful          = MutableStateFlow<Boolean?>(null)
     val isConnectionSuccessful: StateFlow<Boolean?> = _isConnectionSuccessful
 
-    private val _connectionError = MutableStateFlow("")
-    val connectionError: StateFlow<String> = _connectionError
+    private val _connectionError            = MutableStateFlow("")
+    val connectionError: StateFlow<String>  = _connectionError
 
     // ── Viewer records ────────────────────────────────────────────────────────
-    private val _serverRecords = MutableStateFlow<List<RecordingResponse>>(emptyList())
+    private val _serverRecords                    = MutableStateFlow<List<RecordingResponse>>(emptyList())
     val serverRecords: StateFlow<List<RecordingResponse>> = _serverRecords
 
-    private val _isRecordsLoading = MutableStateFlow(false)
+    private val _isRecordsLoading            = MutableStateFlow(false)
     val isRecordsLoading: StateFlow<Boolean> = _isRecordsLoading
 
-    private val _recordsError = MutableStateFlow("")
-    val recordsError: StateFlow<String> = _recordsError
+    private val _recordsError            = MutableStateFlow("")
+    val recordsError: StateFlow<String>  = _recordsError
 
     // ── Delete state ──────────────────────────────────────────────────────────
-    private val _deletingId = MutableStateFlow<Long?>(null)
-    val deletingId: StateFlow<Long?> = _deletingId
+    private val _deletingId           = MutableStateFlow<Long?>(null)
+    val deletingId: StateFlow<Long?>  = _deletingId
 
-    private val _deleteError = MutableStateFlow("")
-    val deleteError: StateFlow<String> = _deleteError
+    private val _deleteError            = MutableStateFlow("")
+    val deleteError: StateFlow<String>  = _deleteError
 
-    // ── Sandbox ───────────────────────────────────────────────────────────────
-    private val _sandboxStatus = MutableStateFlow("")
-    val sandboxStatus: StateFlow<String> = _sandboxStatus
+    // ── Auto-download state ───────────────────────────────────────────────────
+    private val _isAutoDownloading            = MutableStateFlow(false)
+    val isAutoDownloading: StateFlow<Boolean> = _isAutoDownloading
+
+    private val _autoDownloadProgress            = MutableStateFlow(Pair(0, 0)) // (done, total)
+    val autoDownloadProgress: StateFlow<Pair<Int, Int>> = _autoDownloadProgress
+
+    private val _autoDownloadError            = MutableStateFlow("")
+    val autoDownloadError: StateFlow<String>  = _autoDownloadError
+
+    // ── Purge remote state ────────────────────────────────────────────────────
+    private val _isPurgingRemote            = MutableStateFlow(false)
+    val isPurgingRemote: StateFlow<Boolean> = _isPurgingRemote
+
+    private val _purgeResult            = MutableStateFlow<Pair<Boolean, String>?>(null)
+    val purgeResult: StateFlow<Pair<Boolean, String>?> = _purgeResult
 
     // ── Player ────────────────────────────────────────────────────────────────
     private var exoPlayer: ExoPlayer? = null
 
-    private val _currentPlayingRecord = MutableStateFlow<RecordingResponse?>(null)
+    private val _currentPlayingRecord                      = MutableStateFlow<RecordingResponse?>(null)
     val currentPlayingRecord: StateFlow<RecordingResponse?> = _currentPlayingRecord
 
-    private val _isPlaying = MutableStateFlow(false)
+    private val _isPlaying            = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying
 
-    private val _playbackPosition = MutableStateFlow(0L)
+    private val _playbackPosition         = MutableStateFlow(0L)
     val playbackPosition: StateFlow<Long> = _playbackPosition
 
-    private val _playbackDuration = MutableStateFlow(0L)
+    private val _playbackDuration         = MutableStateFlow(0L)
     val playbackDuration: StateFlow<Long> = _playbackDuration
 
     // ── Settings ──────────────────────────────────────────────────────────────
-    val serverUrl   = MutableStateFlow(repository.getServerUrl())
-    val username    = MutableStateFlow(repository.getUsername())
-    val password    = MutableStateFlow(repository.getPassword())
+    val serverUrl     = MutableStateFlow(repository.getServerUrl())
+    val username      = MutableStateFlow(repository.getUsername())
+    val password      = MutableStateFlow(repository.getPassword())
     val monitorFolder = MutableStateFlow(repository.getMonitorFolderPath())
 
     private var playbackProgressJob: Job? = null
@@ -101,13 +116,8 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     init {
         initPlayer()
         startPlaybackProgressTracker()
-        // Reset any stuck uploads from a previous crash
-        viewModelScope.launch {
-            repository.resetStuckUploads()
-        }
-        // Auto-start service and index files immediately
+        viewModelScope.launch { repository.resetStuckUploads() }
         startService()
-        // Fetch server records if already authenticated
         if (repository.getAuthToken().isNotEmpty()) {
             fetchServerRecords()
         }
@@ -117,11 +127,8 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
 
     fun startService() {
         val intent = Intent(context, CallUploadService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent)
-        } else {
-            context.startService(intent)
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+        else context.startService(intent)
     }
 
     // ── Connection / Auth ─────────────────────────────────────────────────────
@@ -132,7 +139,6 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
             _isConnectionSuccessful.value = null
             _connectionError.value = ""
 
-            // Step 1: check reachability
             val (reachable, reachErr) = repository.testConnection()
             if (!reachable) {
                 _isConnectionSuccessful.value = false
@@ -141,7 +147,6 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
                 return@launch
             }
 
-            // Step 2: authenticate
             val (authed, authErr) = repository.login()
             _isConnectionSuccessful.value = authed
             _connectionError.value = if (authed) "" else authErr
@@ -161,6 +166,11 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
             _serverRecords.value = records
             _recordsError.value = error
             _isRecordsLoading.value = false
+
+            // Auto-trigger download after fetch
+            if (records.isNotEmpty()) {
+                autoDownloadAll()
+            }
         }
     }
 
@@ -178,6 +188,67 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
+    // ── Auto-download (receiver) ──────────────────────────────────────────────
+
+    fun autoDownloadAll() {
+        if (_isAutoDownloading.value) return
+        viewModelScope.launch {
+            _isAutoDownloading.value = true
+            _autoDownloadError.value = ""
+            _autoDownloadProgress.value = Pair(0, 0)
+
+            val records = _serverRecords.value
+            val (done, errors) = repository.autoDownloadAll(records) { downloaded, total ->
+                _autoDownloadProgress.value = Pair(downloaded, total)
+            }
+
+            _isAutoDownloading.value = false
+            if (errors > 0) {
+                _autoDownloadError.value = "$errors fichier(s) n'ont pas pu être téléchargés"
+            }
+        }
+    }
+
+    fun downloadSingleRecord(record: RecordingResponse) {
+        viewModelScope.launch {
+            repository.downloadRecordLocally(record)
+        }
+    }
+
+    // ── Purge remote ──────────────────────────────────────────────────────────
+
+    /** Verifies all server records are locally present, then purges server. */
+    fun purgeRemote() {
+        viewModelScope.launch {
+            _isPurgingRemote.value = true
+            _purgeResult.value = null
+
+            val serverRecords = _serverRecords.value
+            val result = repository.purgeRemoteRecords(serverRecords)
+            _purgeResult.value = result
+
+            if (result.first) {
+                // Clear local list after successful purge
+                _serverRecords.value = emptyList()
+            }
+            _isPurgingRemote.value = false
+        }
+    }
+
+    fun clearPurgeResult() {
+        _purgeResult.value = null
+    }
+
+    // ── Local downloads management ────────────────────────────────────────────
+
+    fun deleteLocalDownload(recordId: Long) {
+        viewModelScope.launch { repository.deleteLocalDownload(recordId) }
+    }
+
+    fun purgeAllLocalDownloads() {
+        viewModelScope.launch { repository.purgeAllLocalDownloads() }
+    }
+
     // ── Settings ──────────────────────────────────────────────────────────────
 
     fun saveSettings(url: String, user: String, pass: String, folder: String) {
@@ -185,61 +256,15 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
         repository.setUsername(user)
         repository.setPassword(pass)
         repository.setMonitorFolderPath(folder)
-        repository.setAuthToken("") // force re-login with new credentials
+        repository.setAuthToken("")
 
-        serverUrl.value = repository.getServerUrl()
-        username.value = user
-        password.value = pass
+        serverUrl.value     = repository.getServerUrl()
+        username.value      = user
+        password.value      = pass
         monitorFolder.value = folder
 
-        // Reset connection state after settings change
         _isConnectionSuccessful.value = null
         _connectionError.value = ""
-    }
-
-    // ── Sandbox ───────────────────────────────────────────────────────────────
-
-    fun generateDummyCallRecording() {
-        viewModelScope.launch {
-            _sandboxStatus.value = "Génération…"
-            val folderPath = repository.getMonitorFolderPath()
-            val folder = File(folderPath)
-
-            withContext(Dispatchers.IO) {
-                folder.mkdirs()
-                val timestamp = System.currentTimeMillis()
-                val file = File(folder, "Test_Call_${timestamp}.m4a")
-
-                // Write a minimal valid M4A header so it's recognized as audio
-                FileOutputStream(file).use { fos ->
-                    // ftyp box — marks this as an M4A/MP4 file
-                    val ftyp = byteArrayOf(
-                        0,0,0,32,  // box size = 32
-                        0x66,0x74,0x79,0x70, // 'ftyp'
-                        0x4D,0x34,0x41,0x20, // 'M4A '
-                        0,0,0,0,             // minor version
-                        0x4D,0x34,0x41,0x20, // 'M4A '
-                        0x6D,0x70,0x34,0x32, // 'mp42'
-                        0x69,0x73,0x6F,0x6D, // 'isom'
-                        0x00,0x00,0x00,0x00  // padding
-                    )
-                    fos.write(ftyp)
-                    // Pad to make a non-zero file
-                    fos.write(ByteArray(1024) { (it % 256).toByte() })
-                }
-                repository.addLog("Sandbox", "Created test file: ${file.name}")
-            }
-
-            // Trigger immediate scan so it gets queued
-            val found = repository.scanFolderManually()
-            _sandboxStatus.value = if (found > 0) "✓ Fichier créé et détecté — upload en cours" else "Fichier créé (déjà indexé)"
-
-            // Kick off upload
-            startService()
-
-            delay(3000)
-            _sandboxStatus.value = ""
-        }
     }
 
     // ── Upload controls ───────────────────────────────────────────────────────
@@ -259,13 +284,8 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun clearAllLogs() {
-        viewModelScope.launch { repository.clearLogs() }
-    }
-
-    fun clearAllUploads() {
-        viewModelScope.launch { repository.clearUploads() }
-    }
+    fun clearAllLogs()    { viewModelScope.launch { repository.clearLogs() } }
+    fun clearAllUploads() { viewModelScope.launch { repository.clearUploads() } }
 
     // ── Player ────────────────────────────────────────────────────────────────
 
@@ -288,7 +308,7 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     private fun startPlaybackProgressTracker() {
         playbackProgressJob = viewModelScope.launch {
             while (true) {
-                delay(500)
+                delay(300)
                 val player = exoPlayer ?: continue
                 if (player.isPlaying) {
                     _playbackPosition.value = player.currentPosition
@@ -299,32 +319,50 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun playRecord(record: RecordingResponse) {
-        val serverUrl = repository.getServerUrl().trimEnd('/')
-        val token = repository.getAuthToken()
-        val streamUrl = "$serverUrl/stream/${record.id}"
+        // Prefer local file if available
+        viewModelScope.launch {
+            val localEntry = withContext(Dispatchers.IO) {
+                repository.downloadedRecordDao.getByRecordId(record.id)
+            }
 
-        val dataSourceFactory = DefaultHttpDataSource.Factory()
-            .setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
+            val localFile = localEntry?.let { File(it.localPath) }
+            if (localFile != null && localFile.exists()) {
+                // Play from local storage (no network needed)
+                exoPlayer?.let { player ->
+                    player.stop()
+                    player.setMediaItem(MediaItem.fromUri(android.net.Uri.fromFile(localFile)))
+                    player.prepare()
+                    player.play()
+                    _currentPlayingRecord.value = record
+                    _isPlaying.value = true
+                    _playbackPosition.value = 0L
+                }
+            } else {
+                // Stream from server
+                val serverUrl = repository.getServerUrl().trimEnd('/')
+                val token = repository.getAuthToken()
+                val streamUrl = "$serverUrl/stream/${record.id}"
 
-        val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory)
-            .createMediaSource(MediaItem.fromUri(streamUrl))
+                val dataSourceFactory = DefaultHttpDataSource.Factory()
+                    .setDefaultRequestProperties(mapOf("Authorization" to "Bearer $token"))
 
-        exoPlayer?.let { player ->
-            player.stop()
-            player.setMediaSource(mediaSource)
-            player.prepare()
-            player.play()
-            _currentPlayingRecord.value = record
-            _isPlaying.value = true
-            _playbackPosition.value = 0L
+                val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory)
+                    .createMediaSource(MediaItem.fromUri(streamUrl))
+
+                exoPlayer?.let { player ->
+                    player.stop()
+                    player.setMediaSource(mediaSource)
+                    player.prepare()
+                    player.play()
+                    _currentPlayingRecord.value = record
+                    _isPlaying.value = true
+                    _playbackPosition.value = 0L
+                }
+            }
         }
     }
 
-    fun togglePlayPause() {
-        exoPlayer?.let {
-            if (it.isPlaying) it.pause() else it.play()
-        }
-    }
+    fun togglePlayPause() { exoPlayer?.let { if (it.isPlaying) it.pause() else it.play() } }
 
     fun seekTo(positionMs: Long) {
         exoPlayer?.seekTo(positionMs)

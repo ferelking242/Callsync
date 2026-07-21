@@ -6,8 +6,8 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "logs")
 data class LogEntry(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val timestamp: Long = System.currentTimeMillis(),
-    val tag: String, // "Uploader", "Viewer", "Service", "API"
+    val tag: String,
     val message: String,
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    val timestamp: Long = System.currentTimeMillis()
 )

@@ -1,17 +1,13 @@
 package com.example.data.database
 
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
-import androidx.room.Query
-import androidx.room.Room
-import androidx.room.RoomDatabase
-import androidx.room.Update
 import android.content.Context
-import com.example.data.model.Upload
+import androidx.room.*
+import com.example.data.model.DownloadedRecord
 import com.example.data.model.LogEntry
+import com.example.data.model.Upload
 import kotlinx.coroutines.flow.Flow
+
+// ── Upload DAO ────────────────────────────────────────────────────────────────
 
 @Dao
 interface UploadDao {
@@ -43,6 +39,8 @@ interface UploadDao {
     suspend fun clearAllUploads()
 }
 
+// ── Log DAO ───────────────────────────────────────────────────────────────────
+
 @Dao
 interface LogDao {
     @Query("SELECT * FROM logs ORDER BY timestamp DESC LIMIT 500")
@@ -55,10 +53,43 @@ interface LogDao {
     suspend fun clearAllLogs()
 }
 
-@Database(entities = [Upload::class, LogEntry::class], version = 2, exportSchema = false)
+// ── Downloaded Record DAO ─────────────────────────────────────────────────────
+
+@Dao
+interface DownloadedRecordDao {
+    @Query("SELECT * FROM downloaded_records ORDER BY downloadedAt DESC")
+    fun getAllDownloaded(): Flow<List<DownloadedRecord>>
+
+    @Query("SELECT * FROM downloaded_records")
+    suspend fun getAllDownloadedSync(): List<DownloadedRecord>
+
+    @Query("SELECT * FROM downloaded_records WHERE recordId = :recordId LIMIT 1")
+    suspend fun getByRecordId(recordId: Long): DownloadedRecord?
+
+    @Query("SELECT COUNT(*) FROM downloaded_records")
+    suspend fun count(): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(record: DownloadedRecord): Long
+
+    @Query("DELETE FROM downloaded_records WHERE recordId = :recordId")
+    suspend fun deleteByRecordId(recordId: Long)
+
+    @Query("DELETE FROM downloaded_records")
+    suspend fun clearAll()
+}
+
+// ── Database ──────────────────────────────────────────────────────────────────
+
+@Database(
+    entities = [Upload::class, LogEntry::class, DownloadedRecord::class],
+    version = 3,
+    exportSchema = false
+)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun uploadDao(): UploadDao
     abstract fun logDao(): LogDao
+    abstract fun downloadedRecordDao(): DownloadedRecordDao
 
     companion object {
         @Volatile

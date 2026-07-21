@@ -6,16 +6,10 @@ import okhttp3.MultipartBody
 import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import retrofit2.Response
-import retrofit2.http.Body
-import retrofit2.http.DELETE
-import retrofit2.http.GET
-import retrofit2.http.Header
-import retrofit2.http.Multipart
-import retrofit2.http.POST
-import retrofit2.http.Part
-import retrofit2.http.Path
+import retrofit2.http.*
 
-// Models
+// ── Models ────────────────────────────────────────────────────────────────────
+
 @JsonClass(generateAdapter = true)
 data class LoginRequest(
     val username: String,
@@ -23,9 +17,7 @@ data class LoginRequest(
 )
 
 @JsonClass(generateAdapter = true)
-data class LoginResponse(
-    val token: String
-)
+data class LoginResponse(val token: String)
 
 @JsonClass(generateAdapter = true)
 data class RecordingResponse(
@@ -34,7 +26,7 @@ data class RecordingResponse(
     val size: Long,
     val sha256: String,
     val duration: Double,
-    @Json(name = "upload_date") val uploadDate: String,
+    @Json(name = "upload_date")   val uploadDate: String,
     @Json(name = "creation_date") val creationDate: String,
     val path: String,
     @Json(name = "device_id") val deviceId: String
@@ -48,12 +40,30 @@ data class HealthResponse(
     val app: String? = null
 )
 
+@JsonClass(generateAdapter = true)
+data class StorageStatsResponse(
+    val recordings: Long,
+    @Json(name = "recordings_bytes") val recordingsBytes: Long,
+    @Json(name = "disk_total")  val diskTotal: Long,
+    @Json(name = "disk_free")   val diskFree: Long,
+    @Json(name = "disk_used")   val diskUsed: Long,
+    @Json(name = "db_total_size") val dbTotalSize: Long
+)
+
+@JsonClass(generateAdapter = true)
+data class PurgeResponse(
+    val message: String,
+    val deleted: Int,
+    val errors: Int,
+    val total: Int
+)
+
+// ── API Interface ─────────────────────────────────────────────────────────────
+
 interface CallSyncApi {
 
     @POST("login")
-    suspend fun login(
-        @Body request: LoginRequest
-    ): Response<LoginResponse>
+    suspend fun login(@Body request: LoginRequest): Response<LoginResponse>
 
     @GET("health")
     suspend fun checkHealth(): Response<HealthResponse>
@@ -63,11 +73,11 @@ interface CallSyncApi {
     suspend fun uploadFile(
         @Header("Authorization") token: String,
         @Part file: MultipartBody.Part,
-        @Part("phone_id") phoneId: RequestBody,
-        @Part("device_name") deviceName: RequestBody,
+        @Part("phone_id")        phoneId: RequestBody,
+        @Part("device_name")     deviceName: RequestBody,
         @Part("android_version") androidVersion: RequestBody,
-        @Part("timestamp") timestamp: RequestBody,
-        @Part("sha256") sha256: RequestBody
+        @Part("timestamp")       timestamp: RequestBody,
+        @Part("sha256")          sha256: RequestBody
     ): Response<ResponseBody>
 
     @GET("records")
@@ -81,9 +91,35 @@ interface CallSyncApi {
         @Path("id") id: Long
     ): Response<RecordingResponse>
 
+    /** Inline streaming (ExoPlayer) */
+    @GET("stream/{id}")
+    suspend fun streamRecord(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): Response<ResponseBody>
+
+    /** Binary download saved to disk */
+    @Streaming
+    @GET("download/{id}")
+    suspend fun downloadRecord(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): Response<ResponseBody>
+
     @DELETE("record/{id}")
     suspend fun deleteRecord(
         @Header("Authorization") token: String,
         @Path("id") id: Long
     ): Response<ResponseBody>
+
+    /** Purge ALL recordings from server (call only after receiver has all files locally) */
+    @DELETE("purge-all")
+    suspend fun purgeAllRecords(
+        @Header("Authorization") token: String
+    ): Response<PurgeResponse>
+
+    @GET("storage/stats")
+    suspend fun getStorageStats(
+        @Header("Authorization") token: String
+    ): Response<StorageStatsResponse>
 }

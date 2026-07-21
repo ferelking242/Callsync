@@ -26,19 +26,21 @@ import java.io.File
 
 class CallUploadService : Service() {
 
-    private val serviceJob = SupervisorJob()
+    private val serviceJob   = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
     private lateinit var repository: CallSyncRepository
 
-    // One observer per watched directory (root + all sub-dirs)
     private val fileObservers = mutableListOf<CustomFileObserver>()
     private var uploadJob: Job? = null
 
-    companion object {
-        private const val CHANNEL_ID       = "CallSyncServiceChannel"
-        private const val NOTIFICATION_ID  = 1001
+    // Periodic retry job: every 5 min re-trigger upload for any pending/failed
+    private var retryJob: Job? = null
 
-        val isRunning     = MutableStateFlow(false)
+    companion object {
+        private const val CHANNEL_ID      = "CallSyncServiceChannel"
+        private const val NOTIFICATION_ID = 1001
+
+        val isRunning      = MutableStateFlow(false)
         val lastUploadTime = MutableStateFlow<Long?>(null)
     }
 
@@ -54,13 +56,13 @@ class CallUploadService : Service() {
         startForegroundCompat()
         serviceScope.launch {
             repository.addLog("Service", "Service started — scanning & monitoring")
-            // 1. Index everything already on disk
             val found = repository.scanFolderManually()
-            if (found > 0) repository.addLog("Service", "Initial scan found $found new file(s)")
-            // 2. Upload anything pending
+            if (found > 0) repository.addLog("Service", "Initial scan: $found new file(s)")
             triggerUploadQueue()
         }
         startMonitoring()
+        startPeriodicRetry()
+        // Service is restarted automatically if killed (START_STICKY)
         return START_STICKY
     }
 
@@ -68,14 +70,10 @@ class CallUploadService : Service() {
 
     private fun startMonitoring() {
         stopObservers()
-
-        val rootPath = repository.getMonitorFolderPath()
+        val rootPath   = repository.getMonitorFolderPath()
         val rootFolder = File(rootPath).also { it.mkdirs() }
 
-        // Watch root folder
         addObserver(rootFolder)
-
-        // Watch existing sub-directories (phone-number folders)
         rootFolder.listFiles()?.filter { it.isDirectory }?.forEach { sub -> addObserver(sub) }
 
         serviceScope.launch { repository.addLog("Service", "Monitoring: $rootPath (+ sub-dirs)") }
@@ -86,11 +84,7 @@ class CallUploadService : Service() {
             serviceScope.launch {
                 val file = File(dir, fileName)
                 handleNewFile(file)
-
-                // If a new sub-directory appeared, watch it too
-                if (file.isDirectory) {
-                    addObserver(file)
-                }
+                if (file.isDirectory) addObserver(file)
             }
         }
         obs.startWatching()
@@ -103,38 +97,30 @@ class CallUploadService : Service() {
     }
 
     private suspend fun handleNewFile(file: File) {
-        if (!file.exists() || !file.isFile) return
-        if (!repository.isAudioFile(file)) return
+        if (!file.exists() || !file.isFile || !repository.isAudioFile(file)) return
 
         repository.addLog("Service", "New file detected: ${file.name} — waiting for write…")
 
-        // Wait until file size stabilises (write finished)
+        // Wait until file write finishes (size stabilises)
         var previousSize = -1L
         var stableCount  = 0
-        repeat(30) {
+        repeat(60) {
             val currentSize = file.length()
             if (currentSize == previousSize && currentSize > 0) {
                 stableCount++
                 if (stableCount >= 2) return@repeat
             } else {
-                stableCount = 0
+                stableCount  = 0
                 previousSize = currentSize
             }
             delay(500)
         }
 
-        val existing = repository.uploadDao.getUploadByPath(file.absolutePath)
-        if (existing != null) return
+        if (repository.uploadDao.getUploadByPath(file.absolutePath) != null) return
 
         val sha256 = repository.calculateSHA256(file)
         repository.uploadDao.insertUpload(
-            Upload(
-                sha256  = sha256,
-                path    = file.absolutePath,
-                name    = file.name,
-                size    = file.length(),
-                status  = "PENDING"
-            )
+            Upload(sha256 = sha256, path = file.absolutePath, name = file.name, size = file.length(), status = "PENDING")
         )
         repository.addLog("Service", "Queued for upload: ${file.name}")
         triggerUploadQueue()
@@ -143,12 +129,27 @@ class CallUploadService : Service() {
     private fun triggerUploadQueue() {
         if (uploadJob?.isActive == true) return
         uploadJob = serviceScope.launch {
-            delay(1000) // small debounce
+            delay(800) // small debounce
             val uploaded = repository.uploadPendingFiles()
             if (uploaded > 0) {
                 lastUploadTime.value = System.currentTimeMillis()
                 repository.addLog("Service", "Uploaded $uploaded file(s)")
-                updateNotification("Last upload: $uploaded file(s) sent")
+                updateNotification("✓ $uploaded fichier(s) envoyé(s)")
+            }
+        }
+    }
+
+    /** Retry pending/failed uploads every 5 minutes */
+    private fun startPeriodicRetry() {
+        retryJob?.cancel()
+        retryJob = serviceScope.launch {
+            while (true) {
+                delay(5 * 60 * 1000L)
+                val pending = repository.uploadDao.getPendingUploads()
+                if (pending.isNotEmpty()) {
+                    repository.addLog("Service", "Periodic retry: ${pending.size} file(s) pending")
+                    triggerUploadQueue()
+                }
             }
         }
     }
@@ -156,7 +157,7 @@ class CallUploadService : Service() {
     // ── Foreground notification ───────────────────────────────────────────────
 
     private fun startForegroundCompat() {
-        val notification = buildNotification("Monitoring call recordings…")
+        val notification = buildNotification("Surveillance en cours…")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
                 startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
@@ -186,16 +187,18 @@ class CallUploadService : Service() {
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID,
-                "CallSync Monitor",
-                NotificationManager.IMPORTANCE_LOW
-            )
+                CHANNEL_ID, "CallSync Monitor", NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Surveillance & envoi automatique des enregistrements"
+                setShowBadge(false)
+            }
             (getSystemService(NotificationManager::class.java))?.createNotificationChannel(channel)
         }
     }
@@ -203,6 +206,7 @@ class CallUploadService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopObservers()
+        retryJob?.cancel()
         serviceJob.cancel()
         isRunning.value = false
     }
@@ -211,10 +215,8 @@ class CallUploadService : Service() {
 
     // ── FileObserver wrapper ──────────────────────────────────────────────────
 
-    private class CustomFileObserver(
-        path: String,
-        private val onCreated: (String) -> Unit
-    ) : FileObserver(path, CREATE or MOVED_TO or CLOSE_WRITE) {
+    private class CustomFileObserver(path: String, private val onCreated: (String) -> Unit)
+        : FileObserver(path, CREATE or MOVED_TO or CLOSE_WRITE) {
         override fun onEvent(event: Int, path: String?) {
             if (path != null) onCreated(path)
         }
