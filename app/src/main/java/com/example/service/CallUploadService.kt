@@ -101,19 +101,23 @@ class CallUploadService : Service() {
 
         repository.addLog("Service", "New file detected: ${file.name} — waiting for write…")
 
-        // Wait until file write finishes (size stabilises)
+        // Wait until file write finishes (size stabilises).
+        // Uses a labeled run block so we can break out as soon as the file is stable,
+        // instead of always waiting the full 60 iterations (30 s).
         var previousSize = -1L
         var stableCount  = 0
-        repeat(60) {
-            val currentSize = file.length()
-            if (currentSize == previousSize && currentSize > 0) {
-                stableCount++
-                if (stableCount >= 2) return@repeat
-            } else {
-                stableCount  = 0
-                previousSize = currentSize
+        run stabilityCheck@{
+            repeat(60) {
+                val currentSize = file.length()
+                if (currentSize == previousSize && currentSize > 0) {
+                    stableCount++
+                    if (stableCount >= 2) return@stabilityCheck // file is stable — break out
+                } else {
+                    stableCount  = 0
+                    previousSize = currentSize
+                }
+                delay(500)
             }
-            delay(500)
         }
 
         if (repository.uploadDao.getUploadByPath(file.absolutePath) != null) return
