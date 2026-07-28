@@ -1,21 +1,76 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# ── Kotlin ────────────────────────────────────────────────────────────────────
+-keep class kotlin.** { *; }
+-keep class kotlin.Metadata { *; }
+-keepclassmembers class **$WhenMappings { <fields>; }
+-keepclassmembers class kotlin.Lazy { *; }
+-dontwarn kotlin.**
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# ── Coroutines ────────────────────────────────────────────────────────────────
+-keepclassmembernames class kotlinx.** {
+    volatile <fields>;
+}
+-dontwarn kotlinx.coroutines.**
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# ── Moshi ─────────────────────────────────────────────────────────────────────
+-keep class com.squareup.moshi.** { *; }
+-keep @com.squareup.moshi.JsonClass class * { *; }
+-keepclassmembers class * {
+    @com.squareup.moshi.FromJson <methods>;
+    @com.squareup.moshi.ToJson <methods>;
+}
+-dontwarn com.squareup.moshi.**
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep all Moshi-generated adapters
+-keep class **JsonAdapter { *; }
+-keep class **JsonAdapter$* { *; }
+
+# ── Retrofit ──────────────────────────────────────────────────────────────────
+-keep class retrofit2.** { *; }
+-keepclassmembers,allowshrinking,allowobfuscation interface * {
+    @retrofit2.http.* <methods>;
+}
+-dontwarn retrofit2.**
+-dontwarn org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement
+
+# ── OkHttp ────────────────────────────────────────────────────────────────────
+-keep class okhttp3.** { *; }
+-keep interface okhttp3.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**
+
+# ── Room ──────────────────────────────────────────────────────────────────────
+-keep class * extends androidx.room.RoomDatabase
+-keep @androidx.room.Entity class * { *; }
+-keep @androidx.room.Dao interface * { *; }
+-dontwarn androidx.room.**
+
+# ── Our data models (used with Moshi serialization) ───────────────────────────
+-keep class com.example.data.api.** { *; }
+-keep class com.example.data.model.** { *; }
+
+# ── Android components ────────────────────────────────────────────────────────
+-keep public class * extends android.app.Activity
+-keep public class * extends android.app.Service
+-keep public class * extends android.content.BroadcastReceiver
+-keep public class * extends android.content.ContentProvider
+-keepclassmembers class * extends android.content.BroadcastReceiver {
+    public void onReceive(android.content.Context, android.content.Intent);
+}
+
+# ── WorkManager ───────────────────────────────────────────────────────────────
+-keep class * extends androidx.work.Worker
+-keep class * extends androidx.work.CoroutineWorker
+-keep class * extends androidx.work.ListenableWorker {
+    public <init>(android.content.Context, androidx.work.WorkerParameters);
+}
+-dontwarn androidx.work.**
+
+# ── Compose ───────────────────────────────────────────────────────────────────
+-keep class androidx.compose.** { *; }
+-dontwarn androidx.compose.**
+
+# ── Suppress misc warnings ────────────────────────────────────────────────────
+-dontwarn com.google.android.gms.**
+-dontwarn com.google.firebase.**
+-dontwarn javax.annotation.**
+-dontwarn sun.misc.Unsafe

@@ -16,6 +16,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.Upload
@@ -24,7 +25,10 @@ import java.text.SimpleDateFormat
 import java.util.*
 
 @Composable
-fun UploaderScreen(viewModel: CallSyncViewModel) {
+fun UploaderScreen(
+    viewModel: CallSyncViewModel,
+    modifier: Modifier = Modifier
+) {
     val uploads         by viewModel.uploads.collectAsState()
     val isServiceActive by viewModel.isServiceActive.collectAsState()
     val lastUploadTime  by viewModel.lastUploadTime.collectAsState()
@@ -38,13 +42,16 @@ fun UploaderScreen(viewModel: CallSyncViewModel) {
     val uploading = remember(uploads) { uploads.count { it.status == "UPLOADING" } }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(16.dp),
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // ── Status row ────────────────────────────────────────────────────────
+        // ── Status row ─────────────────────────────────────────────────────
         item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 ServiceStatusCard(modifier = Modifier.weight(1f), isActive = isServiceActive)
                 ConnectionStatusCard(
                     modifier     = Modifier.weight(1f),
@@ -55,25 +62,30 @@ fun UploaderScreen(viewModel: CallSyncViewModel) {
             }
         }
 
-        // ── Connection error ──────────────────────────────────────────────────
+        // ── Connection error ────────────────────────────────────────────────
         if (connError.isNotEmpty()) {
             item { UploaderErrorBanner(message = connError) }
         }
 
-        // ── Upload progress (if active) ───────────────────────────────────────
+        // ── Upload in-progress banner ───────────────────────────────────────
         if (uploading > 0) {
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     shape    = RoundedCornerShape(12.dp),
-                    colors   = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+                    colors   = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
                 ) {
                     Row(
                         modifier = Modifier.padding(14.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
                         Column {
                             Text(
                                 "Upload en cours — $uploading fichier(s)",
@@ -92,26 +104,65 @@ fun UploaderScreen(viewModel: CallSyncViewModel) {
             }
         }
 
-        // ── Stats row ─────────────────────────────────────────────────────────
+        // ── Stats row ───────────────────────────────────────────────────────
         item {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatChip(modifier = Modifier.weight(1f), label = "Envoyés",    value = "$completed", color = MaterialTheme.colorScheme.secondary)
-                StatChip(modifier = Modifier.weight(1f), label = "En attente", value = "$pending",   color = MaterialTheme.colorScheme.primary)
-                StatChip(modifier = Modifier.weight(1f), label = "Erreurs",    value = "$failed",    color = MaterialTheme.colorScheme.error)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                StatChip(
+                    modifier = Modifier.weight(1f),
+                    label    = "Envoyés",
+                    value    = "$completed",
+                    color    = MaterialTheme.colorScheme.secondary
+                )
+                StatChip(
+                    modifier = Modifier.weight(1f),
+                    label    = "En attente",
+                    value    = "$pending",
+                    color    = MaterialTheme.colorScheme.primary
+                )
+                StatChip(
+                    modifier = Modifier.weight(1f),
+                    label    = "Erreurs",
+                    value    = "$failed",
+                    color    = MaterialTheme.colorScheme.error
+                )
             }
         }
 
-        // ── Quick actions ─────────────────────────────────────────────────────
+        // ── Quick actions ───────────────────────────────────────────────────
         item {
-            ActionRow(
-                uploading = uploading > 0,
-                hasFailed = failed > 0,
-                onScan    = { viewModel.scanNow() },
-                onRetry   = { viewModel.retryFailed() }
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick  = { viewModel.scanNow() },
+                    modifier = Modifier.weight(1f),
+                    enabled  = uploading == 0
+                ) {
+                    Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Scanner", style = MaterialTheme.typography.labelMedium)
+                }
+                if (failed > 0) {
+                    OutlinedButton(
+                        onClick  = { viewModel.retryFailed() },
+                        modifier = Modifier.weight(1f),
+                        colors   = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Réessayer", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
         }
 
-        // ── Last upload time ──────────────────────────────────────────────────
+        // ── Last upload time ────────────────────────────────────────────────
         if (lastUploadTime != null) {
             item {
                 val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
@@ -119,7 +170,11 @@ fun UploaderScreen(viewModel: CallSyncViewModel) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(Icons.Default.CheckCircle, null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.secondary)
+                    Icon(
+                        Icons.Default.CheckCircle, null,
+                        modifier = Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
                     Text(
                         "Dernier envoi : ${fmt.format(Date(lastUploadTime!!))}",
                         style = MaterialTheme.typography.labelSmall,
@@ -129,7 +184,7 @@ fun UploaderScreen(viewModel: CallSyncViewModel) {
             }
         }
 
-        // ── File list ─────────────────────────────────────────────────────────
+        // ── File list header ────────────────────────────────────────────────
         if (uploads.isNotEmpty()) {
             item {
                 Row(
@@ -161,7 +216,7 @@ fun UploaderScreen(viewModel: CallSyncViewModel) {
             item { EmptyUploaderState() }
         }
 
-        // ── Logs clear ────────────────────────────────────────────────────────
+        // ── Clear logs ──────────────────────────────────────────────────────
         item {
             TextButton(
                 onClick  = { viewModel.clearAllLogs() },
@@ -175,7 +230,7 @@ fun UploaderScreen(viewModel: CallSyncViewModel) {
     }
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+// ── Sub-components ─────────────────────────────────────────────────────────────
 
 @Composable
 private fun ServiceStatusCard(modifier: Modifier, isActive: Boolean) {
@@ -183,31 +238,47 @@ private fun ServiceStatusCard(modifier: Modifier, isActive: Boolean) {
                          else MaterialTheme.colorScheme.surfaceVariant
     val contentColor   = if (isActive) MaterialTheme.colorScheme.secondary
                          else MaterialTheme.colorScheme.onSurfaceVariant
-
     Card(
         modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = containerColor),
-        shape  = RoundedCornerShape(12.dp)
+        colors   = CardDefaults.cardColors(containerColor = containerColor),
+        shape    = RoundedCornerShape(12.dp)
     ) {
-        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(contentColor))
             Column {
-                Text(if (isActive) "Actif" else "Inactif", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, color = contentColor)
-                Text("Moniteur", style = MaterialTheme.typography.labelSmall, color = contentColor.copy(alpha = 0.7f))
+                Text(
+                    if (isActive) "Actif" else "Inactif",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = contentColor
+                )
+                Text(
+                    "Moniteur",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = contentColor.copy(alpha = 0.7f)
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ConnectionStatusCard(modifier: Modifier, isConnecting: Boolean, connOk: Boolean?, onTest: () -> Unit) {
+private fun ConnectionStatusCard(
+    modifier: Modifier,
+    isConnecting: Boolean,
+    connOk: Boolean?,
+    onTest: () -> Unit
+) {
     val (containerColor, contentColor, label) = when {
-        isConnecting     -> Triple(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.primary, "Test…")
-        connOk == true   -> Triple(MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.secondary, "Connecté")
-        connOk == false  -> Triple(MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.error, "Erreur")
-        else             -> Triple(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.onSurfaceVariant, "Appuyer pour tester")
+        isConnecting    -> Triple(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.primary, "Test…")
+        connOk == true  -> Triple(MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.secondary, "Connecté")
+        connOk == false -> Triple(MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.error, "Erreur")
+        else            -> Triple(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.onSurfaceVariant, "Tester")
     }
-
     Card(
         modifier = modifier,
         onClick  = onTest,
@@ -215,9 +286,17 @@ private fun ConnectionStatusCard(modifier: Modifier, isConnecting: Boolean, conn
         colors   = CardDefaults.cardColors(containerColor = containerColor),
         shape    = RoundedCornerShape(12.dp)
     ) {
-        Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             if (isConnecting) {
-                CircularProgressIndicator(modifier = Modifier.size(8.dp), strokeWidth = 1.5.dp, color = contentColor)
+                CircularProgressIndicator(
+                    modifier = Modifier.size(8.dp),
+                    strokeWidth = 1.5.dp,
+                    color = contentColor
+                )
             } else {
                 Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(contentColor))
             }
@@ -231,42 +310,44 @@ private fun ConnectionStatusCard(modifier: Modifier, isConnecting: Boolean, conn
 
 @Composable
 private fun UploaderErrorBanner(message: String) {
-    Surface(shape = RoundedCornerShape(8.dp), color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
-            Icon(Icons.Default.ErrorOutline, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp).padding(top = 1.dp))
-            Text(message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.weight(1f))
+    Surface(
+        shape    = RoundedCornerShape(8.dp),
+        color    = MaterialTheme.colorScheme.errorContainer,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Icon(
+                Icons.Default.ErrorOutline, null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(18.dp).padding(top = 1.dp)
+            )
+            Text(
+                message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.weight(1f)
+            )
         }
     }
 }
 
 @Composable
 private fun StatChip(modifier: Modifier, label: String, value: String, color: Color) {
-    Card(modifier = modifier, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), shape = RoundedCornerShape(10.dp)) {
-        Column(modifier = Modifier.padding(12.dp).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+    Card(
+        modifier = modifier,
+        colors   = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        shape    = RoundedCornerShape(10.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp).fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
             Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = color)
             Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun ActionRow(uploading: Boolean, hasFailed: Boolean, onScan: () -> Unit, onRetry: () -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = onScan, modifier = Modifier.weight(1f), enabled = !uploading) {
-            Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.width(6.dp))
-            Text("Scanner", style = MaterialTheme.typography.labelMedium)
-        }
-        if (hasFailed) {
-            OutlinedButton(
-                onClick = onRetry,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-            ) {
-                Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Réessayer", style = MaterialTheme.typography.labelMedium)
-            }
         }
     }
 }
@@ -279,7 +360,6 @@ private fun UploadItemRow(upload: Upload) {
         "FAILED"    -> Pair(MaterialTheme.colorScheme.error,     "Erreur")
         else        -> Pair(MaterialTheme.colorScheme.onSurfaceVariant, "En attente")
     }
-
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp, horizontal = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -287,12 +367,29 @@ private fun UploadItemRow(upload: Upload) {
     ) {
         Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(dotColor))
         Column(modifier = Modifier.weight(1f)) {
-            Text(upload.name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                upload.name,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             if (upload.status == "FAILED" && upload.errorMessage != null) {
-                Text(upload.errorMessage, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    upload.errorMessage,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
-        Text(statusText, style = MaterialTheme.typography.labelSmall, color = dotColor, fontWeight = FontWeight.SemiBold)
+        Text(
+            statusText,
+            style = MaterialTheme.typography.labelSmall,
+            color = dotColor,
+            fontWeight = FontWeight.SemiBold
+        )
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
 }
@@ -300,17 +397,25 @@ private fun UploadItemRow(upload: Upload) {
 @Composable
 private fun EmptyUploaderState() {
     Column(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 40.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Icon(Icons.Default.FolderOff, null, modifier = Modifier.size(40.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text("Aucun fichier indexé", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Icon(
+            Icons.Default.Sync, null,
+            modifier = Modifier.size(48.dp),
+            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+        )
         Text(
-            "Configurez le dossier dans ⚙ Paramètres",
+            "Aucun fichier indexé",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            "Configurez le dossier dans ⚙ Paramètres\nou attendez la détection automatique",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            textAlign = TextAlign.Center
         )
     }
 }

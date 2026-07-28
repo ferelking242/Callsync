@@ -2,15 +2,14 @@ package com.example.data.repository
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.database.Cursor
 import android.os.Build
+import android.provider.MediaStore
 import android.util.Log
 import com.example.data.api.CallSyncApi
 import com.example.data.api.LoginRequest
-import com.example.data.api.PurgeResponse
 import com.example.data.api.RecordingResponse
-import com.example.data.api.StorageStatsResponse
 import com.example.data.database.AppDatabase
-import com.example.data.model.DownloadedRecord
 import com.example.data.model.LogEntry
 import com.example.data.model.Upload
 import kotlinx.coroutines.Dispatchers
@@ -28,7 +27,6 @@ import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -36,13 +34,11 @@ import java.util.concurrent.TimeUnit
 class CallSyncRepository(private val context: Context) {
 
     private val database = AppDatabase.getDatabase(context)
-    val uploadDao            = database.uploadDao()
-    val logDao               = database.logDao()
-    val downloadedRecordDao  = database.downloadedRecordDao()
+    val uploadDao           = database.uploadDao()
+    val logDao              = database.logDao()
 
-    val allUploads:          Flow<List<Upload>>          = uploadDao.getAllUploads()
-    val allLogs:             Flow<List<LogEntry>>        = logDao.getAllLogs()
-    val allDownloadedRecords: Flow<List<DownloadedRecord>> = downloadedRecordDao.getAllDownloaded()
+    val allUploads: Flow<List<Upload>>    = uploadDao.getAllUploads()
+    val allLogs:    Flow<List<LogEntry>>  = logDao.getAllLogs()
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("callsync_prefs", Context.MODE_PRIVATE)
@@ -56,20 +52,21 @@ class CallSyncRepository(private val context: Context) {
     // ── Settings ──────────────────────────────────────────────────────────────
 
     fun getServerUrl(): String {
-        var url = prefs.getString("server_url", "https://sarcastic-wiry-lava--havek99178.replit.app/") ?: "https://sarcastic-wiry-lava--havek99178.replit.app/"
+        var url = prefs.getString("server_url", "https://sarcastic-wiry-lava--havek99178.replit.app/")
+                  ?: "https://sarcastic-wiry-lava--havek99178.replit.app/"
         if (!url.endsWith("/")) url += "/"
         return url
     }
     fun setServerUrl(url: String) { prefs.edit().putString("server_url", url).apply(); resetApi() }
 
     fun getUsername(): String = prefs.getString("username", "admin") ?: "admin"
-    fun setUsername(user: String) = prefs.edit().putString("username", user).apply()
+    fun setUsername(u: String) { prefs.edit().putString("username", u).apply() }
 
     fun getPassword(): String = prefs.getString("password", "admin123") ?: "admin123"
-    fun setPassword(pass: String) = prefs.edit().putString("password", pass).apply()
+    fun setPassword(p: String) { prefs.edit().putString("password", p).apply() }
 
     fun getAuthToken(): String = prefs.getString("auth_token", "") ?: ""
-    fun setAuthToken(token: String) = prefs.edit().putString("auth_token", token).apply()
+    fun setAuthToken(t: String) { prefs.edit().putString("auth_token", t).apply() }
 
     fun getPhoneId(): String = prefs.getString("phone_id", "") ?: ""
 
@@ -83,14 +80,47 @@ class CallSyncRepository(private val context: Context) {
     fun getAndroidVersion(): String = Build.VERSION.RELEASE
 
     fun getMonitorFolderPath(): String {
-        val default = "/storage/emulated/0/Recordings/Call"
+        val default = autoDetectCallRecordingsFolder().ifEmpty {
+            "/storage/emulated/0/Recordings/Call"
+        }
         return prefs.getString("monitor_folder", default) ?: default
     }
-    fun setMonitorFolderPath(path: String) = prefs.edit().putString("monitor_folder", path).apply()
+    fun setMonitorFolderPath(path: String) {
+        prefs.edit().putString("monitor_folder", path).apply()
+    }
 
     fun isOnboardingCompleted(): Boolean = prefs.getBoolean("onboarding_completed", false)
-    fun setOnboardingCompleted(completed: Boolean) =
-        prefs.edit().putBoolean("onboarding_completed", completed).apply()
+    fun setOnboardingCompleted(b: Boolean) { prefs.edit().putBoolean("onboarding_completed", b).apply() }
+
+    // ── Server SHA256 cache (dedup) ───────────────────────────────────────────
+
+    /** Returns true if this SHA256 is already known to be on the server. */
+    fun isOnServer(sha256: String): Boolean {
+        val set = prefs.getStringSet("server_sha256_cache", emptySet()) ?: emptySet()
+        return set.contains(sha256)
+    }
+
+    /** Fetches the full records list and caches all SHA256 hashes locally. */
+    suspend fun refreshServerSha256Cache() = withContext(Dispatchers.IO) {
+        try {
+            if (getAuthToken().isEmpty()) login()
+            val resp = getApi().getRecords("Bearer ${getAuthToken()}")
+            if (resp.isSuccessful) {
+                val sha256Set = resp.body()?.map { it.sha256 }?.toSet() ?: emptySet()
+                prefs.edit().putStringSet("server_sha256_cache", sha256Set).apply()
+                addLog("Cache", "Refreshed server SHA256 cache: ${sha256Set.size} entries")
+            }
+        } catch (e: Exception) {
+            addLog("Cache", "SHA256 cache refresh failed: ${e.message}", true)
+        }
+    }
+
+    /** Adds a SHA256 to the local server cache (called after successful upload). */
+    private fun addToServerCache(sha256: String) {
+        val current = prefs.getStringSet("server_sha256_cache", emptySet())?.toMutableSet() ?: mutableSetOf()
+        current.add(sha256)
+        prefs.edit().putStringSet("server_sha256_cache", current).apply()
+    }
 
     // ── Retrofit / API ────────────────────────────────────────────────────────
 
@@ -144,20 +174,18 @@ class CallSyncRepository(private val context: Context) {
         try {
             val response = getApi().checkHealth()
             if (response.isSuccessful) {
-                addLog("Auth", "Server reachable — ${response.body()?.status}")
+                addLog("Auth", "Server reachable")
                 Pair(true, "")
             } else {
                 val err = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                addLog("Auth", "Health check failed: $err", true)
-                Pair(false, "Server returned ${response.code()}: $err")
+                Pair(false, "HTTP ${response.code()}: $err")
             }
         } catch (e: Exception) {
-            addLog("Auth", "Connection error: ${e.message}", true)
             Pair(false, e.message ?: "Unknown error")
         }
     }
 
-    // ── Upload (parallel) ─────────────────────────────────────────────────────
+    // ── Upload (parallel, dedup) ──────────────────────────────────────────────
 
     suspend fun uploadPendingFiles(): Int = withContext(Dispatchers.IO) {
         if (getAuthToken().isEmpty()) {
@@ -171,14 +199,11 @@ class CallSyncRepository(private val context: Context) {
         val pending = uploadDao.getPendingUploads()
         if (pending.isEmpty()) return@withContext 0
 
-        // Upload up to CONCURRENCY files simultaneously
         val CONCURRENCY = 4
         var uploaded = 0
         pending.chunked(CONCURRENCY).forEach { chunk ->
             coroutineScope {
-                val results = chunk.map { upload ->
-                    async { uploadSingle(upload) }
-                }.awaitAll()
+                val results = chunk.map { upload -> async { uploadSingle(upload) } }.awaitAll()
                 uploaded += results.count { it }
             }
         }
@@ -189,11 +214,19 @@ class CallSyncRepository(private val context: Context) {
         val file = File(upload.path)
         if (!file.exists()) {
             addLog("Uploader", "File missing, marking failed: ${upload.name}", true)
-            uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = "File not found on disk"))
+            uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = "File not found"))
             return false
         }
         return try {
-            val sha256       = calculateSHA256(file)
+            val sha256 = calculateSHA256(file)
+
+            // Dedup: already on server?
+            if (isOnServer(sha256)) {
+                uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
+                addLog("Uploader", "Skipped (already on server): ${upload.name}")
+                return true
+            }
+
             val token        = "Bearer ${getAuthToken()}"
             val mediaType    = getMediaType(file).toMediaTypeOrNull()
             val fileBody     = file.asRequestBody(mediaType)
@@ -207,21 +240,33 @@ class CallSyncRepository(private val context: Context) {
             uploadDao.updateUpload(upload.copy(status = "UPLOADING"))
             val response = getApi().uploadFile(token, filePart, phoneIdBody, deviceBody, versionBody, tsBody, sha256Body)
 
-            if (response.isSuccessful) {
-                uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
-                addLog("Uploader", "Uploaded: ${upload.name}")
-                true
-            } else {
-                val errBody = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                if (response.code() == 401) {
+            when {
+                response.isSuccessful -> {
+                    uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
+                    addToServerCache(sha256)
+                    addLog("Uploader", "Uploaded: ${upload.name}")
+                    true
+                }
+                // 409 = sha256 conflict → already exists on server
+                response.code() == 409 -> {
+                    uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
+                    addToServerCache(sha256)
+                    addLog("Uploader", "Skipped (server conflict/duplicate): ${upload.name}")
+                    true
+                }
+                response.code() == 401 -> {
                     setAuthToken("")
                     val (ok, _) = login()
-                    uploadDao.updateUpload(upload.copy(status = if (ok) "PENDING" else "FAILED", errorMessage = if (ok) null else errBody))
-                } else {
-                    uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = errBody))
-                    addLog("Uploader", "Upload failed (${response.code()}): ${upload.name} — $errBody", true)
+                    uploadDao.updateUpload(upload.copy(status = if (ok) "PENDING" else "FAILED",
+                        errorMessage = if (ok) null else "Auth failed"))
+                    false
                 }
-                false
+                else -> {
+                    val errBody = response.errorBody()?.string() ?: "HTTP ${response.code()}"
+                    uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = errBody))
+                    addLog("Uploader", "Upload failed (${response.code()}): ${upload.name}", true)
+                    false
+                }
             }
         } catch (e: Exception) {
             uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = e.message))
@@ -243,168 +288,12 @@ class CallSyncRepository(private val context: Context) {
         }
     }
 
-    suspend fun deleteRecord(id: Long): Pair<Boolean, String> = withContext(Dispatchers.IO) {
-        try {
-            if (getAuthToken().isEmpty()) login()
-            val response = getApi().deleteRecord("Bearer ${getAuthToken()}", id)
-            if (response.isSuccessful) {
-                addLog("Viewer", "Deleted record ID $id from server")
-                // Remove local download entry if present
-                downloadedRecordDao.deleteByRecordId(id)
-                Pair(true, "")
-            } else {
-                val err = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                addLog("Viewer", "Delete failed: $err", true)
-                Pair(false, err)
-            }
-        } catch (e: Exception) {
-            addLog("Viewer", "Delete exception: ${e.message}", true)
-            Pair(false, e.message ?: "Unknown error")
-        }
-    }
-
-    // ── Download to local storage ─────────────────────────────────────────────
-
-    /** Downloads a recording to app-internal storage. Returns (success, error). */
-    suspend fun downloadRecordLocally(record: RecordingResponse): Pair<Boolean, String> =
-        withContext(Dispatchers.IO) {
-            // Already downloaded?
-            if (downloadedRecordDao.getByRecordId(record.id) != null) return@withContext Pair(true, "")
-
-            try {
-                if (getAuthToken().isEmpty()) login()
-                val response = getApi().downloadRecord("Bearer ${getAuthToken()}", record.id)
-                if (!response.isSuccessful) {
-                    val err = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                    return@withContext Pair(false, err)
-                }
-
-                val body = response.body() ?: return@withContext Pair(false, "Empty response body")
-
-                // Save to internal app storage (invisible to other apps)
-                val dir = File(context.filesDir, "recordings").also { it.mkdirs() }
-                val localFile = File(dir, record.name)
-
-                body.byteStream().use { input ->
-                    FileOutputStream(localFile).use { output ->
-                        input.copyTo(output, bufferSize = 65536)
-                    }
-                }
-
-                downloadedRecordDao.insert(
-                    DownloadedRecord(
-                        recordId    = record.id,
-                        sha256      = record.sha256,
-                        name        = record.name,
-                        size        = record.size,
-                        localPath   = localFile.absolutePath
-                    )
-                )
-                addLog("Receiver", "Downloaded locally: ${record.name}")
-                Pair(true, "")
-            } catch (e: Exception) {
-                addLog("Receiver", "Download failed: ${record.name} — ${e.message}", true)
-                Pair(false, e.message ?: "Unknown error")
-            }
-        }
-
-    /** Auto-downloads all server records not yet stored locally (parallel). */
-    suspend fun autoDownloadAll(
-        records: List<RecordingResponse>,
-        onProgress: suspend (downloaded: Int, total: Int) -> Unit = { _, _ -> }
-    ): Pair<Int, Int> = withContext(Dispatchers.IO) {
-        val missing = records.filter { r ->
-            downloadedRecordDao.getByRecordId(r.id) == null
-        }
-        if (missing.isEmpty()) return@withContext Pair(0, 0)
-
-        addLog("Receiver", "Auto-download: ${missing.size} file(s) to fetch")
-
-        var done = 0
-        var errors = 0
-        missing.chunked(3).forEach { chunk ->
-            coroutineScope {
-                chunk.map { record ->
-                    async {
-                        val (ok, _) = downloadRecordLocally(record)
-                        if (ok) done++ else errors++
-                        onProgress(done, missing.size)
-                    }
-                }.awaitAll()
-            }
-        }
-        Pair(done, errors)
-    }
-
-    // ── Purge remote ──────────────────────────────────────────────────────────
+    // ── Folder scanning — index-on-change only ─────────────────────────────────
 
     /**
-     * Verifies the receiver has all server records locally, then purges the server.
-     * Returns (success, message).
+     * Scans the monitored folder and adds only NEW files to the upload queue.
+     * Files already in the DB (by path OR sha256=COMPLETED) are skipped — no redundant work.
      */
-    suspend fun purgeRemoteRecords(serverRecords: List<RecordingResponse>): Pair<Boolean, String> =
-        withContext(Dispatchers.IO) {
-            try {
-                // 0 records on server → already clean
-                if (serverRecords.isEmpty()) return@withContext Pair(true, "Serveur déjà vide")
-
-                // Check which server records are missing locally
-                val missing = serverRecords.filter { r ->
-                    downloadedRecordDao.getByRecordId(r.id) == null
-                }
-
-                if (missing.isNotEmpty()) {
-                    val msg = "${missing.size} fichier(s) pas encore téléchargé(s) localement. Lance le téléchargement auto d'abord."
-                    addLog("Purge", msg, true)
-                    return@withContext Pair(false, msg)
-                }
-
-                // All good — call purge-all
-                if (getAuthToken().isEmpty()) login()
-                val response = getApi().purgeAllRecords("Bearer ${getAuthToken()}")
-                if (response.isSuccessful) {
-                    val body = response.body()
-                    val msg  = "Serveur purgé — ${body?.deleted ?: 0} fichier(s) supprimé(s)"
-                    addLog("Purge", msg)
-                    Pair(true, msg)
-                } else {
-                    val err = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                    addLog("Purge", "Purge échouée: $err", true)
-                    Pair(false, err)
-                }
-            } catch (e: Exception) {
-                addLog("Purge", "Purge exception: ${e.message}", true)
-                Pair(false, e.message ?: "Unknown error")
-            }
-        }
-
-    // ── Local downloads management ────────────────────────────────────────────
-
-    /** Delete a single locally-downloaded file + its DB entry. */
-    suspend fun deleteLocalDownload(recordId: Long) = withContext(Dispatchers.IO) {
-        val entry = downloadedRecordDao.getByRecordId(recordId) ?: return@withContext
-        try { File(entry.localPath).delete() } catch (_: Exception) {}
-        downloadedRecordDao.deleteByRecordId(recordId)
-        addLog("Receiver", "Deleted local copy: ${entry.name}")
-    }
-
-    /** Delete ALL locally-downloaded files + clear the table. */
-    suspend fun purgeAllLocalDownloads() = withContext(Dispatchers.IO) {
-        val dir = File(context.filesDir, "recordings")
-        try { dir.deleteRecursively() } catch (_: Exception) {}
-        dir.mkdirs()
-        downloadedRecordDao.clearAll()
-        addLog("Receiver", "All local downloads purged")
-    }
-
-    /** Returns total bytes used by local recordings folder. */
-    fun localDownloadsDirSize(): Long {
-        val dir = File(context.filesDir, "recordings")
-        return dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-    }
-
-    // ── Folder scanning (source phone) ────────────────────────────────────────
-
     suspend fun scanFolderManually(): Int = withContext(Dispatchers.IO) {
         val folderPath = getMonitorFolderPath()
         val folder = File(folderPath)
@@ -416,15 +305,45 @@ class CallSyncRepository(private val context: Context) {
         }
 
         val allFiles = collectAudioFiles(folder)
-        addLog("Scanner", "Found ${allFiles.size} audio file(s) total")
+        addLog("Scanner", "Found ${allFiles.size} audio file(s)")
 
         var addedCount = 0
         for (file in allFiles) {
-            if (uploadDao.getUploadByPath(file.absolutePath) == null) {
-                val sha256 = calculateSHA256(file)
+            // 1. Already indexed by path?
+            val existingByPath = uploadDao.getUploadByPath(file.absolutePath)
+            if (existingByPath != null) continue   // already in queue/completed — skip
+
+            val sha256 = calculateSHA256(file)
+
+            // 2. Already completed by sha256 (renamed/moved file)?
+            val existingBySha = uploadDao.getUploadBySha256(sha256)
+            if (existingBySha != null && existingBySha.status == "COMPLETED") {
+                // Insert as COMPLETED so path-dedup catches it next time
                 uploadDao.insertUpload(
-                    Upload(sha256 = sha256, path = file.absolutePath, name = file.name, size = file.length(), status = "PENDING")
+                    Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
+                        size = file.length(), status = "COMPLETED",
+                        uploadedAt = existingBySha.uploadedAt)
                 )
+                continue
+            }
+
+            // 3. Already on server (cached SHA256 set)?
+            if (isOnServer(sha256)) {
+                uploadDao.insertUpload(
+                    Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
+                        size = file.length(), status = "COMPLETED",
+                        uploadedAt = System.currentTimeMillis())
+                )
+                addLog("Scanner", "Skipped (on server): ${file.name}")
+                continue
+            }
+
+            // 4. Truly new — queue for upload
+            val inserted = uploadDao.insertUpload(
+                Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
+                    size = file.length(), status = "PENDING")
+            )
+            if (inserted > 0) {
                 addedCount++
                 addLog("Scanner", "Queued: ${file.name}")
             }
@@ -435,15 +354,8 @@ class CallSyncRepository(private val context: Context) {
 
     private fun collectAudioFiles(root: File): List<File> {
         val result = mutableListOf<File>()
-        root.listFiles()?.forEach { entry ->
-            when {
-                entry.isFile && isAudioFile(entry) -> result.add(entry)
-                entry.isDirectory -> {
-                    entry.listFiles()?.forEach { sub ->
-                        if (sub.isFile && isAudioFile(sub)) result.add(sub)
-                    }
-                }
-            }
+        root.walkTopDown().maxDepth(3).forEach { entry ->
+            if (entry.isFile && isAudioFile(entry)) result.add(entry)
         }
         return result
     }
@@ -467,12 +379,99 @@ class CallSyncRepository(private val context: Context) {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
+    // ── Auto-detect call recordings folder ───────────────────────────────────
+
+    /**
+     * Scans all known OEM call-recorder paths and returns the one with the most
+     * audio files. Falls back to a MediaStore query if nothing is found on disk.
+     * Returns empty string if nothing is found (caller should use a sensible default).
+     */
+    fun autoDetectCallRecordingsFolder(): String {
+        val candidates = listOf(
+            // AOSP / stock Android
+            "/storage/emulated/0/Recordings/Call",
+            "/storage/emulated/0/Recordings",
+            // MIUI / Xiaomi
+            "/storage/emulated/0/MIUI/sound_recorder/call_rec",
+            "/storage/emulated/0/MIUI/sound_recorder",
+            // Samsung One UI
+            "/storage/emulated/0/Sounds/CallRecordings",
+            "/storage/emulated/0/Sounds",
+            // Huawei
+            "/storage/emulated/0/Sounds/CallRecord",
+            // OnePlus / OxygenOS
+            "/storage/emulated/0/Recordings/CallRecording",
+            // Generic
+            "/storage/emulated/0/PhoneRecord",
+            "/storage/emulated/0/CallRecordings",
+            "/storage/emulated/0/CallRecording",
+            "/storage/emulated/0/Download/CallRecordings",
+            "/storage/emulated/0/Voice Recorder/call",
+            "/storage/emulated/0/Record/Call",
+            "/sdcard/Recordings/Call",
+            "/sdcard/MIUI/sound_recorder/call_rec"
+        )
+
+        var bestPath  = ""
+        var bestCount = 0
+
+        for (path in candidates) {
+            val dir = File(path)
+            if (dir.exists() && dir.isDirectory) {
+                val count = dir.walkTopDown().maxDepth(2).count { it.isFile && isAudioFile(it) }
+                if (count > bestCount) {
+                    bestCount = count
+                    bestPath  = path
+                }
+            }
+        }
+
+        // If nothing found on disk, try MediaStore query
+        if (bestPath.isEmpty()) {
+            bestPath = findCallRecordingsFolderViaMediaStore() ?: ""
+        }
+
+        Log.d("CallSync/AutoDetect", "Best folder: $bestPath ($bestCount files)")
+        return bestPath
+    }
+
+    private fun findCallRecordingsFolderViaMediaStore(): String? {
+        return try {
+            val projection = arrayOf(MediaStore.Audio.Media.DATA)
+            val selection  = "${MediaStore.Audio.Media.DURATION} > ? AND (${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ? OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?)"
+            val selArgs    = arrayOf("5000", "%call%", "%record%")
+
+            val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            else
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+
+            val cursor: Cursor? = context.contentResolver.query(uri, projection, selection, selArgs, null)
+            val folders = mutableMapOf<String, Int>()
+
+            cursor?.use { c ->
+                val colIdx = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+                while (c.moveToNext()) {
+                    val path = c.getString(colIdx) ?: continue
+                    val dir  = File(path).parent ?: continue
+                    folders[dir] = (folders[dir] ?: 0) + 1
+                }
+            }
+
+            folders.maxByOrNull { it.value }?.key
+        } catch (e: Exception) {
+            Log.w("CallSync/AutoDetect", "MediaStore query failed: ${e.message}")
+            null
+        }
+    }
+
     // ── Logs ──────────────────────────────────────────────────────────────────
 
     suspend fun addLog(tag: String, message: String, isError: Boolean = false) =
         withContext(Dispatchers.IO) {
             Log.d("CallSync/$tag", message)
-            logDao.insertLog(LogEntry(tag = tag, message = message, isError = isError, timestamp = System.currentTimeMillis()))
+            logDao.insertLog(LogEntry(tag = tag, message = message, isError = isError,
+                timestamp = System.currentTimeMillis()))
         }
 
     suspend fun clearLogs()    = withContext(Dispatchers.IO) { logDao.clearAllLogs() }
@@ -485,7 +484,11 @@ class CallSyncRepository(private val context: Context) {
     }
 
     suspend fun retryFailedUploads() = withContext(Dispatchers.IO) {
-        val failed = uploadDao.getPendingUploads().filter { it.status == "FAILED" }
-        failed.forEach { uploadDao.updateUpload(it.copy(status = "PENDING", errorMessage = null, retryCount = it.retryCount + 1)) }
+        val failed = uploadDao.getFailedUploads()
+        failed.forEach {
+            uploadDao.updateUpload(it.copy(status = "PENDING", errorMessage = null,
+                retryCount = it.retryCount + 1))
+        }
+        if (failed.isNotEmpty()) addLog("Uploader", "Retry ${failed.size} failed upload(s)")
     }
 }

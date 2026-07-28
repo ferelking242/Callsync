@@ -2,7 +2,6 @@ package com.example.data.database
 
 import android.content.Context
 import androidx.room.*
-import com.example.data.model.DownloadedRecord
 import com.example.data.model.LogEntry
 import com.example.data.model.Upload
 import kotlinx.coroutines.flow.Flow
@@ -16,6 +15,9 @@ interface UploadDao {
 
     @Query("SELECT * FROM uploads WHERE status = 'PENDING' OR status = 'FAILED' ORDER BY id ASC")
     suspend fun getPendingUploads(): List<Upload>
+
+    @Query("SELECT * FROM uploads WHERE status = 'FAILED' ORDER BY id ASC")
+    suspend fun getFailedUploads(): List<Upload>
 
     @Query("SELECT * FROM uploads WHERE sha256 = :sha256 LIMIT 1")
     suspend fun getUploadBySha256(sha256: String): Upload?
@@ -53,43 +55,16 @@ interface LogDao {
     suspend fun clearAllLogs()
 }
 
-// ── Downloaded Record DAO ─────────────────────────────────────────────────────
-
-@Dao
-interface DownloadedRecordDao {
-    @Query("SELECT * FROM downloaded_records ORDER BY downloadedAt DESC")
-    fun getAllDownloaded(): Flow<List<DownloadedRecord>>
-
-    @Query("SELECT * FROM downloaded_records")
-    suspend fun getAllDownloadedSync(): List<DownloadedRecord>
-
-    @Query("SELECT * FROM downloaded_records WHERE recordId = :recordId LIMIT 1")
-    suspend fun getByRecordId(recordId: Long): DownloadedRecord?
-
-    @Query("SELECT COUNT(*) FROM downloaded_records")
-    suspend fun count(): Int
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insert(record: DownloadedRecord): Long
-
-    @Query("DELETE FROM downloaded_records WHERE recordId = :recordId")
-    suspend fun deleteByRecordId(recordId: Long)
-
-    @Query("DELETE FROM downloaded_records")
-    suspend fun clearAll()
-}
-
 // ── Database ──────────────────────────────────────────────────────────────────
 
 @Database(
-    entities = [Upload::class, LogEntry::class, DownloadedRecord::class],
-    version = 3,
+    entities = [Upload::class, LogEntry::class],
+    version  = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun uploadDao(): UploadDao
-    abstract fun logDao(): LogDao
-    abstract fun downloadedRecordDao(): DownloadedRecordDao
+    abstract fun logDao():    LogDao
 
     companion object {
         @Volatile
