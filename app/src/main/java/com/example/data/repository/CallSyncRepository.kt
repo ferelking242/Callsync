@@ -492,6 +492,32 @@ class CallSyncRepository(private val context: Context) {
         if (failed.isNotEmpty()) addLog("Uploader", "Retry ${failed.size} failed upload(s)")
     }
 
+    // ── Delete all local files + index ────────────────────────────────────────
+
+    /**
+     * Deletes every audio file tracked in the DB from the filesystem,
+     * then clears the uploads index (Room table).
+     * Returns the number of files actually deleted.
+     */
+    suspend fun deleteAllLocalFilesAndIndex(): Int = withContext(Dispatchers.IO) {
+        val uploads = uploadDao.getAllUploadsList()
+        var deleted = 0
+        for (upload in uploads) {
+            try {
+                val file = File(upload.path)
+                if (file.exists()) {
+                    file.delete()
+                    deleted++
+                }
+            } catch (e: Exception) {
+                addLog("DeleteAll", "Erreur suppression ${upload.name}: ${e.message}", true)
+            }
+        }
+        uploadDao.clearAllUploads()
+        addLog("DeleteAll", "$deleted fichier(s) supprimé(s) + index vidé")
+        deleted
+    }
+
     // ── Delete-at-source polling ───────────────────────────────────────────────
 
     /**

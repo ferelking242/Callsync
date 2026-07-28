@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,6 +22,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.model.Upload
 import com.example.ui.viewmodel.CallSyncViewModel
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -159,6 +161,13 @@ fun UploaderScreen(
                         Text("Réessayer", style = MaterialTheme.typography.labelMedium)
                     }
                 }
+            }
+        }
+
+        // ── Delete all local files ──────────────────────────────────────────
+        if (uploads.isNotEmpty()) {
+            item {
+                DeleteAllLocalButton(viewModel = viewModel)
             }
         }
 
@@ -416,6 +425,93 @@ private fun EmptyUploaderState() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
             textAlign = TextAlign.Center
+        )
+    }
+}
+
+// ── Delete all local files button ─────────────────────────────────────────────
+
+@Composable
+private fun DeleteAllLocalButton(viewModel: CallSyncViewModel) {
+    val isDeletingAll by viewModel.isDeletingAll.collectAsState()
+    val deleteAllResult by viewModel.deleteAllResult.collectAsState()
+    var showConfirm by remember { mutableStateOf(false) }
+
+    // Show result snackbar-style
+    if (deleteAllResult != null) {
+        LaunchedEffect(deleteAllResult) {
+            kotlinx.coroutines.delay(3000)
+            viewModel.clearDeleteAllResult()
+        }
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape    = RoundedCornerShape(10.dp),
+            colors   = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer
+            )
+        ) {
+            Row(
+                modifier = Modifier.padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Default.CheckCircle, null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.secondary)
+                Text("$deleteAllResult fichier(s) supprimé(s) du dossier + index vidé",
+                    style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        return
+    }
+
+    OutlinedButton(
+        onClick  = { showConfirm = true },
+        modifier = Modifier.fillMaxWidth(),
+        enabled  = !isDeletingAll,
+        colors   = ButtonDefaults.outlinedButtonColors(
+            contentColor = MaterialTheme.colorScheme.error
+        ),
+        border   = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f))
+    ) {
+        if (isDeletingAll) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.error
+            )
+        } else {
+            Icon(Icons.Default.DeleteForever, null, modifier = Modifier.size(16.dp))
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            if (isDeletingAll) "Suppression…" else "Supprimer tout le dossier + index",
+            style = MaterialTheme.typography.labelMedium
+        )
+    }
+
+    if (showConfirm) {
+        AlertDialog(
+            onDismissRequest = { showConfirm = false },
+            title = { Text("Supprimer tous les fichiers ?") },
+            text  = {
+                Text(
+                    "Tous les enregistrements dans le dossier surveillé seront " +
+                    "définitivement effacés et l'index sera vidé.\n\n" +
+                    "Les fichiers déjà envoyés au serveur ne seront pas affectés."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { showConfirm = false; viewModel.deleteAllLocal() },
+                    colors  = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) { Text("Tout supprimer") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirm = false }) { Text("Annuler") }
+            }
         )
     }
 }

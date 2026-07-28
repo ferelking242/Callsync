@@ -142,4 +142,23 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
 
     fun clearAllLogs()    { viewModelScope.launch { repository.clearLogs() } }
     fun clearAllUploads() { viewModelScope.launch { repository.clearUploads() } }
+
+    // ── Delete all local files + index ────────────────────────────────────────
+
+    private val _deleteAllResult           = MutableStateFlow<Int?>(null)
+    val deleteAllResult: StateFlow<Int?>   = _deleteAllResult
+    private val _isDeletingAll             = MutableStateFlow(false)
+    val isDeletingAll: StateFlow<Boolean>  = _isDeletingAll
+
+    fun deleteAllLocal() {
+        viewModelScope.launch {
+            _isDeletingAll.value = true
+            _deleteAllResult.value = null
+            val deleted = repository.deleteAllLocalFilesAndIndex()
+            _deleteAllResult.value = deleted
+            _isDeletingAll.value = false
+        }
+    }
+
+    fun clearDeleteAllResult() { _deleteAllResult.value = null }
 }

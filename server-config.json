@@ -1,0 +1,6 @@
+{
+  "url": "https://callsync-server.replit.app/",
+  "username": "admin",
+  "password": "admin123",
+  "_note": "Modifiez cette URL pour pointer vers votre serveur deployé — l'app Flutter la lira au premier démarrage, sans recompilation."
+}

@@ -37,6 +37,9 @@ interface UploadDao {
     @Query("DELETE FROM uploads WHERE id = :id")
     suspend fun deleteUploadById(id: Long)
 
+    @Query("SELECT * FROM uploads ORDER BY id DESC")
+    suspend fun getAllUploadsList(): List<Upload>
+
     @Query("DELETE FROM uploads")
     suspend fun clearAllUploads()
 }
