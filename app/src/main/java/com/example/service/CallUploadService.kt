@@ -185,6 +185,8 @@ class CallUploadService : Service() {
         uploadJob = serviceScope.launch {
             delay(800)
             val uploaded = repository.uploadPendingFiles()
+            // Poll & execute any pending delete-at-source commands
+            repository.pollAndExecuteDeleteCommands()
             if (uploaded > 0) {
                 lastUploadTime.value = System.currentTimeMillis()
                 repository.addLog("Service", "Uploaded $uploaded file(s)")

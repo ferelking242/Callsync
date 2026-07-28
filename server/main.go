@@ -21,10 +21,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// JWT key used for signing
 var jwtKey = []byte("callsync_secret_security_key_2026")
 
-// GORM Database Schemas
+// ── Models ─────────────────────────────────────────────────────────────────────
+
 type User struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	Username  string    `gorm:"uniqueIndex;not null" json:"username"`
@@ -33,7 +33,7 @@ type User struct {
 }
 
 type Device struct {
-	ID             string    `gorm:"primaryKey" json:"id"` // Unique phone_id from client
+	ID             string    `gorm:"primaryKey" json:"id"`
 	Name           string    `gorm:"not null" json:"name"`
 	AndroidVersion string    `json:"android_version"`
 	LastSeen       time.Time `json:"last_seen"`
@@ -44,126 +44,97 @@ type Recording struct {
 	Name         string    `gorm:"not null" json:"name"`
 	Size         int64     `gorm:"not null" json:"size"`
 	SHA256       string    `gorm:"uniqueIndex;not null" json:"sha256"`
-	Duration     float64   `json:"duration"` // in seconds
+	Duration     float64   `json:"duration"`
 	UploadDate   time.Time `json:"upload_date"`
 	CreationDate time.Time `json:"creation_date"`
-	Path         string    `gorm:"not null" json:"path"` // Local absolute/relative storage path
+	Path         string    `gorm:"not null" json:"path"`
 	DeviceID     string    `gorm:"not null" json:"device_id"`
 	Device       Device    `gorm:"foreignKey:DeviceID" json:"device"`
 }
 
+// DeleteCommand — order queued by Flutter client, consumed by Android uploader
+type DeleteCommand struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	DeviceID    string    `gorm:"not null;index" json:"device_id"`
+	SHA256      string    `gorm:"not null" json:"sha256"`
+	RecordingID uint      `json:"recording_id"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 var db *gorm.DB
 
-// Setup SQLite database and GORM
 func initDB() {
 	var err error
-	dbPath := "callsync.db"
-	db, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	db, err = gorm.Open(sqlite.Open("callsync.db"), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("Failed to connect to SQLite database: %v", err)
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	if err = db.AutoMigrate(&User{}, &Device{}, &Recording{}, &DeleteCommand{}); err != nil {
+		log.Fatalf("Migration failed: %v", err)
 	}
 
-	// Run Auto Migrations
-	err = db.AutoMigrate(&User{}, &Device{}, &Recording{})
-	if err != nil {
-		log.Fatalf("Database auto-migration failed: %v", err)
-	}
-
-	// Seed default administrator if table is empty
 	var userCount int64
 	db.Model(&User{}).Count(&userCount)
 	if userCount == 0 {
-		hashedPassword, err := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
-		if err != nil {
-			log.Fatalf("Failed to hash default password: %v", err)
-		}
-		admin := User{
-			Username:  "admin",
-			Password:  string(hashedPassword),
-			CreatedAt: time.Now(),
-		}
-		if err := db.Create(&admin).Error; err != nil {
-			log.Printf("Warning: failed to seed default admin: %v", err)
-		} else {
-			log.Println("Seeded default admin user: username=admin, password=admin123")
-		}
+		hash, _ := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
+		db.Create(&User{Username: "admin", Password: string(hash), CreatedAt: time.Now()})
+		log.Println("Seeded default admin (admin/admin123)")
 	}
 }
 
-// JWT Claims struct
+// ── JWT ────────────────────────────────────────────────────────────────────────
+
 type Claims struct {
 	Username string `json:"username"`
 	jwt.RegisteredClaims
 }
 
-// Generate JWT token for user
 func generateToken(username string) (string, error) {
-	expirationTime := time.Now().Add(24 * time.Hour)
 	claims := &Claims{
 		Username: username,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(expirationTime),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(jwtKey)
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtKey)
 }
 
-// JWT Auth Middleware
 func authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header missing"})
-			c.Abort()
+		header := c.GetHeader("Authorization")
+		if header == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization header missing"})
 			return
 		}
-
-		parts := strings.Split(authHeader, " ")
+		parts := strings.Split(header, " ")
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid Authorization header format"})
-			c.Abort()
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid Authorization format"})
 			return
 		}
-
-		tokenString := parts[1]
 		claims := &Claims{}
-
-		token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
+		token, err := jwt.ParseWithClaims(parts[1], claims, func(t *jwt.Token) (interface{}, error) {
 			return jwtKey, nil
 		})
-
 		if err != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired JWT token"})
-			c.Abort()
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
 			return
 		}
-
 		c.Set("username", claims.Username)
 		c.Next()
 	}
 }
 
+// ── main ───────────────────────────────────────────────────────────────────────
+
 func main() {
-	// Initialize Database
 	initDB()
 
-	// Ensure storage directory exists
-	if err := os.MkdirAll("storage", 0755); err != nil {
-		log.Fatalf("Failed to create storage directory: %v", err)
-	}
-
-	// Create Gin engine
 	r := gin.Default()
-
-	// Enable CORS
 	r.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
-
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -171,44 +142,47 @@ func main() {
 		c.Next()
 	})
 
-	// Public Routes
+	// Public
 	r.GET("/health", handleHealth)
 	r.POST("/login", handleLogin)
 
-	// Protected Routes (JWT required)
-	authorized := r.Group("/")
-	authorized.Use(authMiddleware())
+	// Protected
+	auth := r.Group("/")
+	auth.Use(authMiddleware())
 	{
-		authorized.POST("/upload", handleUpload)
-		authorized.GET("/records", handleGetRecords)
-		authorized.GET("/record/:id", handleGetRecordDetails)
-		authorized.GET("/stream/:id", handleStreamRecord)
-		authorized.DELETE("/record/:id", handleDeleteRecord)
+		auth.POST("/upload", handleUpload)
+		auth.GET("/records", handleGetRecords)
+		auth.GET("/record/:id", handleGetRecordDetails)
+		auth.GET("/stream/:id", handleStreamRecord)
+		auth.DELETE("/record/:id", handleDeleteRecord)
+		auth.DELETE("/purge-all", handlePurgeAll)
+
+		// Delete-at-source commands
+		auth.POST("/delete-commands", handleCreateDeleteCommands)
+		auth.GET("/pending-commands/:device_id", handleGetPendingCommands)
+		auth.DELETE("/delete-command/:id", handleAcknowledgeDeleteCommand)
 	}
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-
-	log.Printf("CallSync Go Server starting on port %s...", port)
+	log.Printf("CallSync server starting on :%s", port)
 	if err := r.Run(":" + port); err != nil {
-		log.Fatalf("Server failed to start: %v", err)
+		log.Fatalf("Server failed: %v", err)
 	}
 }
 
-// Handlers
+// ── Handlers ───────────────────────────────────────────────────────────────────
 
-// GET /health
 func handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "healthy",
 		"time":    time.Now().Format(time.RFC3339),
-		"version": "1.0.0",
+		"version": "2.0.0",
 	})
 }
 
-// POST /login
 type LoginInput struct {
 	Username string `json:"username" binding:"required"`
 	Password string `json:"password" binding:"required"`
@@ -217,251 +191,293 @@ type LoginInput struct {
 func handleLogin(c *gin.Context) {
 	var input LoginInput
 	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload"})
 		return
 	}
-
 	var user User
 	if err := db.Where("username = ?", input.Username).First(&user).Error; err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
-
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
-
 	token, err := generateToken(user.Username)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate security token"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Token generation failed"})
 		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"token": token,
-	})
+	c.JSON(http.StatusOK, gin.H{"token": token})
 }
 
-// POST /upload (Multipart data: file, phone_id, device_name, android_version, timestamp, sha256)
 func handleUpload(c *gin.Context) {
-	phoneID := c.PostForm("phone_id")
-	deviceName := c.PostForm("device_name")
-	androidVersion := c.PostForm("android_version")
-	timestampStr := c.PostForm("timestamp")
-	clientSHA256 := c.PostForm("sha256")
+	phoneID       := c.PostForm("phone_id")
+	deviceName    := c.PostForm("device_name")
+	androidVersion:= c.PostForm("android_version")
+	timestampStr  := c.PostForm("timestamp")
+	clientSHA256  := c.PostForm("sha256")
 
 	if phoneID == "" || deviceName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing phone_id or device_name"})
 		return
 	}
 
-	// 1. Get the multipart file
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No file uploaded"})
 		return
 	}
 
-	// Open the file to parse bytes and check uniqueness
 	file, err := fileHeader.Open()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read uploaded file header"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open file"})
 		return
 	}
 	defer file.Close()
 
-	// Compute SHA256 of the incoming data stream
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to calculate SHA256 of file stream"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "SHA256 calculation failed"})
 		return
 	}
 	computedSHA256 := hex.EncodeToString(hasher.Sum(nil))
 
-	// Validate with client-provided SHA256 if present
 	if clientSHA256 != "" && clientSHA256 != computedSHA256 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "SHA256 validation mismatch. File transfer may be corrupt."})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "SHA256 mismatch"})
 		return
 	}
 
-	// 2. Register or update device metadata in GORM
-	device := Device{
-		ID:             phoneID,
-		Name:           deviceName,
-		AndroidVersion: androidVersion,
-		LastSeen:       time.Now(),
-	}
-	if err := db.Save(&device).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save device metadata"})
+	// Register/update device
+	db.Save(&Device{ID: phoneID, Name: deviceName, AndroidVersion: androidVersion, LastSeen: time.Now()})
+
+	// Dedup check
+	var existing Recording
+	if err := db.Where("sha256 = ?", computedSHA256).First(&existing).Error; err == nil {
+		log.Printf("[Upload] Duplicate: %s", computedSHA256)
+		c.JSON(http.StatusConflict, gin.H{"message": "Already uploaded", "id": existing.ID})
 		return
 	}
 
-	// 3. Check if recording is already present by SHA-256 to prevent duplicate storage writes!
-	var existingRecording Recording
-	if err := db.Where("sha256 = ?", computedSHA256).First(&existingRecording).Error; err == nil {
-		// Found duplicate! Immediately return success (200) without saving file.
-		log.Printf("[Upload] Duplicate detected. Hash %s already uploaded.", computedSHA256)
-		c.JSON(http.StatusOK, gin.H{
-			"message": "File already exists. Skipped.",
-			"id":      existingRecording.ID,
-		})
-		return
-	}
-
-	// 4. Secure File Saving - avoid directory traversal
+	// Save file
 	safeFilename := filepath.Base(fileHeader.Filename)
-	deviceFolder := filepath.Join("storage", filepath.Clean(phoneID))
-	
-	// Double check that we are writing inside the storage folder to protect system paths
-	cleanDeviceFolder := filepath.Clean(deviceFolder)
-	if !strings.HasPrefix(cleanDeviceFolder, "storage") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Malicious path attempt detected"})
+	safeFilename  = strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == '\000' { return '_' }
+		return r
+	}, safeFilename)
+
+	uploadDir := "uploads"
+	os.MkdirAll(uploadDir, 0755)
+	targetPath := filepath.Join(uploadDir, fmt.Sprintf("%d_%s", time.Now().UnixNano(), safeFilename))
+
+	// Rewind and copy
+	file.Seek(0, io.SeekStart)
+	out, err := os.Create(targetPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file"})
 		return
 	}
-
-	if err := os.MkdirAll(cleanDeviceFolder, 0755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create device storage folder"})
+	if _, err = io.Copy(out, file); err != nil {
+		out.Close(); os.Remove(targetPath)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write file"})
 		return
 	}
+	out.Close()
 
-	targetPath := filepath.Join(cleanDeviceFolder, safeFilename)
-
-	// Save the file on disk
-	if err := c.SaveUploadedFile(fileHeader, targetPath); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file onto disk storage"})
-		return
-	}
-
-	// Determine Creation Date
-	creationTime := time.Now()
-	if timestampStr != "" {
-		if ms, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
-			creationTime = time.Unix(ms/1000, (ms%1000)*1000000)
+	// Parse creation time from timestamp
+	var creationTime time.Time
+	if ts, err := strconv.ParseInt(timestampStr, 10, 64); err == nil {
+		if ts > 1e12 {
+			creationTime = time.UnixMilli(ts)
+		} else {
+			creationTime = time.Unix(ts, 0)
 		}
+	} else {
+		creationTime = time.Now()
 	}
 
-	// 5. Save Recording in SQLite
 	recording := Recording{
 		Name:         safeFilename,
 		Size:         fileHeader.Size,
 		SHA256:       computedSHA256,
-		Duration:     0.0, // Can be extended by reading ID3 tags if needed
 		UploadDate:   time.Now(),
 		CreationDate: creationTime,
 		Path:         targetPath,
 		DeviceID:     phoneID,
 	}
-
 	if err := db.Create(&recording).Error; err != nil {
-		// Clean up saved file from disk on DB write failure to avoid orphaned files
 		os.Remove(targetPath)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record entry in SQLite"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "DB write failed"})
 		return
 	}
 
-	log.Printf("[Upload] New call recording uploaded from %s: %s (Size: %d bytes)", deviceName, safeFilename, fileHeader.Size)
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Upload successful",
-		"id":      recording.ID,
-	})
+	log.Printf("[Upload] %s from %s (%d bytes)", safeFilename, deviceName, fileHeader.Size)
+	c.JSON(http.StatusOK, gin.H{"message": "Upload successful", "id": recording.ID})
 }
 
-// GET /records (Retrieves list of all recordings)
 func handleGetRecords(c *gin.Context) {
 	var recordings []Recording
 	if err := db.Preload("Device").Order("creation_date DESC").Find(&recordings).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve records"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "DB error"})
 		return
 	}
 	c.JSON(http.StatusOK, recordings)
 }
 
-// GET /record/:id (Get single recording details)
 func handleGetRecordDetails(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recording ID format"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
 		return
 	}
-
-	var recording Recording
-	if err := db.Preload("Device").First(&recording, id).Error; err != nil {
+	var rec Recording
+	if err := db.Preload("Device").First(&rec, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Recording not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database retrieval failure"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "DB error"})
 		}
 		return
 	}
-
-	c.JSON(http.StatusOK, recording)
+	c.JSON(http.StatusOK, rec)
 }
 
-// GET /stream/:id (HTTP Range Requests compatible streaming endpoint)
 func handleStreamRecord(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recording ID format"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
 		return
 	}
-
-	var recording Recording
-	if err := db.First(&recording, id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Recording not found"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
-		}
+	var rec Recording
+	if err := db.First(&rec, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
 		return
 	}
-
-	// Verify file exists on disk
-	if _, err := os.Stat(recording.Path); os.IsNotExist(err) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Recording audio file missing on storage disk"})
+	if _, err := os.Stat(rec.Path); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File missing on disk"})
 		return
 	}
-
-	// Serve the file. Gin's c.File automatically manages content range requests!
-	// This enables seeking, play/pause and immediate playback streaming on ExoPlayer.
 	c.Header("Content-Type", "audio/mpeg")
 	c.Header("Accept-Ranges", "bytes")
-	c.File(recording.Path)
+	c.File(rec.Path)
 }
 
-// DELETE /record/:id
 func handleDeleteRecord(c *gin.Context) {
-	idStr := c.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recording ID format"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
 		return
 	}
-
-	var recording Recording
-	if err := db.First(&recording, id).Error; err != nil {
+	var rec Recording
+	if err := db.First(&rec, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Recording not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "DB error"})
 		}
 		return
 	}
+	if err := db.Delete(&rec).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Delete failed"})
+		return
+	}
+	if err := os.Remove(rec.Path); err != nil {
+		log.Printf("[Delete] Warning: could not remove file %s: %v", rec.Path, err)
+	}
+	log.Printf("[Delete] Recording %d (%s) deleted", rec.ID, rec.Name)
+	c.JSON(http.StatusOK, gin.H{"message": "Deleted"})
+}
 
-	// Delete from DB
-	if err := db.Delete(&recording).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete record from SQLite"})
+// DELETE /purge-all — remove ALL recordings from server (server + disk)
+func handlePurgeAll(c *gin.Context) {
+	var recordings []Recording
+	db.Find(&recordings)
+
+	deleted, errs := 0, 0
+	for _, rec := range recordings {
+		if err := db.Delete(&rec).Error; err != nil {
+			errs++
+			continue
+		}
+		if err := os.Remove(rec.Path); err != nil {
+			log.Printf("[Purge] Warning: could not remove %s: %v", rec.Path, err)
+		}
+		deleted++
+	}
+	log.Printf("[Purge] Deleted %d recordings (%d errors)", deleted, errs)
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Purge complete",
+		"deleted": deleted,
+		"errors":  errs,
+		"total":   len(recordings),
+	})
+}
+
+// POST /delete-commands — Flutter client queues deletion orders for a device
+// Body: { "device_id": "...", "sha256_list": ["...", "..."] }
+func handleCreateDeleteCommands(c *gin.Context) {
+	var body struct {
+		DeviceID   string   `json:"device_id" binding:"required"`
+		SHA256List []string `json:"sha256_list" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload"})
+		return
+	}
+	if len(body.SHA256List) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "sha256_list is empty"})
 		return
 	}
 
-	// Delete file from storage disk
-	if err := os.Remove(recording.Path); err != nil {
-		// Log warning but don't fail, since we cleared DB record
-		log.Printf("Warning: failed to delete file %s from disk: %v", recording.Path, err)
+	created := 0
+	for _, sha := range body.SHA256List {
+		// Find the recording to get its ID (only queue if it's actually on server)
+		var rec Recording
+		recID := uint(0)
+		if err := db.Where("sha256 = ?", sha).First(&rec).Error; err == nil {
+			recID = rec.ID
+		}
+
+		cmd := DeleteCommand{
+			DeviceID:    body.DeviceID,
+			SHA256:      sha,
+			RecordingID: recID,
+			CreatedAt:   time.Now(),
+		}
+		if err := db.Create(&cmd).Error; err == nil {
+			created++
+		}
 	}
 
-	log.Printf("[Delete] Recording deleted: ID %d, Name: %s", recording.ID, recording.Name)
-	c.JSON(http.StatusOK, gin.H{"message": "Recording deleted successfully"})
+	log.Printf("[DeleteCmd] %d command(s) queued for device %s", created, body.DeviceID)
+	c.JSON(http.StatusOK, gin.H{"message": "Commands queued", "created": created})
+}
+
+// GET /pending-commands/:device_id — Android uploader polls this
+func handleGetPendingCommands(c *gin.Context) {
+	deviceID := c.Param("device_id")
+	if deviceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing device_id"})
+		return
+	}
+	var commands []DeleteCommand
+	if err := db.Where("device_id = ?", deviceID).Order("created_at ASC").Find(&commands).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "DB error"})
+		return
+	}
+	c.JSON(http.StatusOK, commands)
+}
+
+// DELETE /delete-command/:id — Android acknowledges execution of a command
+func handleAcknowledgeDeleteCommand(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
+		return
+	}
+	if err := db.Delete(&DeleteCommand{}, id).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Delete failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Command acknowledged"})
 }

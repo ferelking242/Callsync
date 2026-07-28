@@ -491,4 +491,51 @@ class CallSyncRepository(private val context: Context) {
         }
         if (failed.isNotEmpty()) addLog("Uploader", "Retry ${failed.size} failed upload(s)")
     }
+
+    // ── Delete-at-source polling ───────────────────────────────────────────────
+
+    /**
+     * Poll the server for deletion commands addressed to this device.
+     * For each command: find the local file by SHA256, delete it, acknowledge.
+     * Safe to call repeatedly — already-deleted files are handled gracefully.
+     */
+    suspend fun pollAndExecuteDeleteCommands() = withContext(Dispatchers.IO) {
+        try {
+            val phoneId = getPhoneId()
+            if (phoneId.isEmpty()) return@withContext
+            if (getAuthToken().isEmpty()) login()
+            val token = "Bearer ${getAuthToken()}"
+
+            val response = getApi().getPendingCommands(token, phoneId)
+            if (!response.isSuccessful) return@withContext
+
+            val commands = response.body() ?: return@withContext
+            if (commands.isEmpty()) return@withContext
+
+            addLog("DeleteCmd", "Received ${commands.size} deletion command(s)")
+
+            for (cmd in commands) {
+                try {
+                    // Find local upload record(s) matching this SHA256
+                    val upload = uploadDao.getUploadBySha256(cmd.sha256)
+                    if (upload != null) {
+                        val file = java.io.File(upload.path)
+                        if (file.exists()) {
+                            file.delete()
+                            addLog("DeleteCmd", "Deleted: ${upload.name}")
+                        }
+                        // Mark as deleted in DB so it won't be re-uploaded
+                        uploadDao.deleteUploadById(upload.id)
+                    }
+
+                    // Acknowledge regardless (command may target a file already gone)
+                    getApi().acknowledgeDeleteCommand(token, cmd.id)
+                } catch (e: Exception) {
+                    addLog("DeleteCmd", "Failed for SHA ${cmd.sha256}: ${e.message}", true)
+                }
+            }
+        } catch (e: Exception) {
+            addLog("DeleteCmd", "Poll failed: ${e.message}", true)
+        }
+    }
 }

@@ -11,10 +11,7 @@ import retrofit2.http.*
 // ── Models ────────────────────────────────────────────────────────────────────
 
 @JsonClass(generateAdapter = true)
-data class LoginRequest(
-    val username: String,
-    val password: String
-)
+data class LoginRequest(val username: String, val password: String)
 
 @JsonClass(generateAdapter = true)
 data class LoginResponse(val token: String)
@@ -58,6 +55,16 @@ data class PurgeResponse(
     val total: Int
 )
 
+/** Deletion command queued by the Flutter client for this Android device */
+@JsonClass(generateAdapter = true)
+data class DeleteCommand(
+    val id: Long,
+    @Json(name = "device_id")    val deviceId: String,
+    val sha256: String,
+    @Json(name = "recording_id") val recordingId: Long,
+    @Json(name = "created_at")   val createdAt: String
+)
+
 // ── API Interface ─────────────────────────────────────────────────────────────
 
 interface CallSyncApi {
@@ -81,9 +88,7 @@ interface CallSyncApi {
     ): Response<ResponseBody>
 
     @GET("records")
-    suspend fun getRecords(
-        @Header("Authorization") token: String
-    ): Response<List<RecordingResponse>>
+    suspend fun getRecords(@Header("Authorization") token: String): Response<List<RecordingResponse>>
 
     @GET("record/{id}")
     suspend fun getRecordDetails(
@@ -91,14 +96,12 @@ interface CallSyncApi {
         @Path("id") id: Long
     ): Response<RecordingResponse>
 
-    /** Inline streaming (ExoPlayer) */
     @GET("stream/{id}")
     suspend fun streamRecord(
         @Header("Authorization") token: String,
         @Path("id") id: Long
     ): Response<ResponseBody>
 
-    /** Binary download saved to disk */
     @Streaming
     @GET("download/{id}")
     suspend fun downloadRecord(
@@ -112,14 +115,25 @@ interface CallSyncApi {
         @Path("id") id: Long
     ): Response<ResponseBody>
 
-    /** Purge ALL recordings from server (call only after receiver has all files locally) */
     @DELETE("purge-all")
-    suspend fun purgeAllRecords(
-        @Header("Authorization") token: String
-    ): Response<PurgeResponse>
+    suspend fun purgeAllRecords(@Header("Authorization") token: String): Response<PurgeResponse>
 
     @GET("storage/stats")
-    suspend fun getStorageStats(
-        @Header("Authorization") token: String
-    ): Response<StorageStatsResponse>
+    suspend fun getStorageStats(@Header("Authorization") token: String): Response<StorageStatsResponse>
+
+    // ── Delete-at-source commands ─────────────────────────────────────────────
+
+    /** Poll pending deletion commands for this device */
+    @GET("pending-commands/{deviceId}")
+    suspend fun getPendingCommands(
+        @Header("Authorization") token: String,
+        @Path("deviceId") deviceId: String
+    ): Response<List<DeleteCommand>>
+
+    /** Acknowledge execution of a command so the server removes it */
+    @DELETE("delete-command/{id}")
+    suspend fun acknowledgeDeleteCommand(
+        @Header("Authorization") token: String,
+        @Path("id") id: Long
+    ): Response<ResponseBody>
 }
