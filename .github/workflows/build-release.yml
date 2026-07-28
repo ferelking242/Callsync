@@ -36,17 +36,37 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Decode Keystore
+      - name: Setup signing keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD:   ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
+          KEYSTORE_FILE="${{ github.workspace }}/my-upload-key.jks"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Decoding keystore from secret..."
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+            echo "SIGN_STORE_PASS=$STORE_PASSWORD" >> $GITHUB_ENV
+            echo "SIGN_KEY_ALIAS=upload"            >> $GITHUB_ENV
+            echo "SIGN_KEY_PASS=$KEY_PASSWORD"      >> $GITHUB_ENV
+          else
+            echo "No KEYSTORE_BASE64 secret — generating ephemeral CI keystore"
+            keytool -genkey -v \
+              -keystore "$KEYSTORE_FILE" \
+              -alias upload -keyalg RSA -keysize 2048 -validity 30 \
+              -dname "CN=CI,OU=CI,O=CI,L=CI,ST=CI,C=US" \
+              -storepass ci_debug_pass -keypass ci_debug_pass -noprompt 2>/dev/null
+            echo "SIGN_STORE_PASS=ci_debug_pass" >> $GITHUB_ENV
+            echo "SIGN_KEY_ALIAS=upload"         >> $GITHUB_ENV
+            echo "SIGN_KEY_PASS=ci_debug_pass"   >> $GITHUB_ENV
+          fi
+          echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> $GITHUB_ENV
 
       - name: Build Optimized Release APK
         env:
-          KEYSTORE_PATH:  ${{ github.workspace }}/my-upload-key.jks
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD:   ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PATH:  ${{ env.KEYSTORE_PATH }}
+          STORE_PASSWORD: ${{ env.SIGN_STORE_PASS }}
+          KEY_PASSWORD:   ${{ env.SIGN_KEY_PASS }}
         run: |
           ./gradlew assembleRelease \
             --no-daemon \
