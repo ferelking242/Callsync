@@ -58,8 +58,8 @@ class CallSyncRepository(private val context: Context) {
     // ── Settings ──────────────────────────────────────────────────────────────
 
     fun getServerUrl(): String {
-        var url = prefs.getString("server_url", "https://sarcastic-wiry-lava--havek99178.replit.app/")
-                  ?: "https://sarcastic-wiry-lava--havek99178.replit.app/"
+        var url = prefs.getString("server_url", "https://vapid-pleasing-drawings--koyih59365.replit.app/")
+                  ?: "https://vapid-pleasing-drawings--koyih59365.replit.app/"
         if (!url.endsWith("/")) url += "/"
         return url
     }
@@ -119,30 +119,48 @@ class CallSyncRepository(private val context: Context) {
     private fun setLastScanTimestamp(ts: Long) { prefs.edit().putLong("last_scan_ts", ts).apply() }
     fun resetScanTimestamp() { prefs.edit().putLong("last_scan_ts", 0L).apply() }
 
-    // ── Server SHA256 cache (dedup) ───────────────────────────────────────────
+    // ── Known-hashes cache (dedup) ────────────────────────────────────────────
+    //
+    // We use an in-memory HashSet instead of SharedPrefs.
+    // Reason: after an Autoscale server restart the server DB is wiped, so a
+    // persisted SharedPrefs set would claim files "already on server" forever →
+    // they'd never be re-uploaded.  An in-memory set resets on each app launch,
+    // so the recorder always does a fresh /known-hashes fetch on startup.
+    //
+    // /known-hashes returns:
+    //   • SHA256s of files currently stored on the server (Recording table)
+    //   • SHA256s of files already downloaded by Flutter clients (ClientDownload table)
+    // → both categories mean "don't upload this file again".
 
-    fun isOnServer(sha256: String): Boolean {
-        val set = prefs.getStringSet("server_sha256_cache", emptySet()) ?: emptySet()
-        return set.contains(sha256)
-    }
+    @Volatile private var knownHashesCache: HashSet<String> = HashSet()
 
-    suspend fun refreshServerSha256Cache() = withContext(Dispatchers.IO) {
+    /** Returns true if sha256 is already known to the server (uploaded or downloaded). */
+    fun isOnServer(sha256: String): Boolean = knownHashesCache.contains(sha256)
+
+    /** Fetches /known-hashes and replaces the in-memory cache. */
+    suspend fun refreshKnownHashesCache() = withContext(Dispatchers.IO) {
         try {
-            val resp = getApi().getRecords("Bearer ${getAuthToken()}")
+            if (getAuthToken().isEmpty()) {
+                val (ok, _) = login()
+                if (!ok) return@withContext
+            }
+            val resp = getApi().getKnownHashes("Bearer ${getAuthToken()}")
             if (resp.isSuccessful) {
-                val sha256Set = resp.body()?.map { it.sha256 }?.toSet() ?: emptySet()
-                prefs.edit().putStringSet("server_sha256_cache", sha256Set).apply()
-                addLog("Cache", "SHA256 cache: ${sha256Set.size} entrée(s)")
+                val list = resp.body()?.sha256List ?: emptyList()
+                knownHashesCache = HashSet(list)
+                addLog("Cache", "Known hashes: ${knownHashesCache.size} entrée(s) (serveur + clients)")
             }
         } catch (e: Exception) {
-            addLog("Cache", "Refresh cache échoué: ${e.message}", true)
+            addLog("Cache", "Refresh known-hashes échoué: ${e.message}", true)
         }
     }
 
+    /** Backward-compat alias used by autoConnectIfNeeded and testConnection. */
+    suspend fun refreshServerSha256Cache() = refreshKnownHashesCache()
+
+    /** Add a hash to the in-memory cache after a successful upload. */
     private fun addToServerCache(sha256: String) {
-        val current = prefs.getStringSet("server_sha256_cache", emptySet())?.toMutableSet() ?: mutableSetOf()
-        current.add(sha256)
-        prefs.edit().putStringSet("server_sha256_cache", current).apply()
+        knownHashesCache.add(sha256)
     }
 
     // ── Retrofit / API ────────────────────────────────────────────────────────
@@ -366,6 +384,14 @@ class CallSyncRepository(private val context: Context) {
             return@withContext 0
         }
 
+        // ── Purge orphan DB entries (file deleted externally while PENDING/FAILED) ──
+        val orphans = uploadDao.getAllUploadsList()
+            .filter { it.status in listOf("PENDING", "FAILED") && !File(it.path).exists() }
+        if (orphans.isNotEmpty()) {
+            orphans.forEach { uploadDao.deleteUploadById(it.id) }
+            addLog("Scanner", "${orphans.size} entrée(s) orpheline(s) nettoyée(s)")
+        }
+
         val lastScanTs  = getLastScanTimestamp()
         val now         = System.currentTimeMillis()
         val isFirstScan = lastScanTs == 0L
@@ -434,6 +460,14 @@ class CallSyncRepository(private val context: Context) {
             return@withContext 0
         }
 
+        // ── Purge orphan DB entries ────────────────────────────────────────────
+        val orphans = uploadDao.getAllUploadsList()
+            .filter { it.status in listOf("PENDING", "FAILED") && !File(it.path).exists() }
+        if (orphans.isNotEmpty()) {
+            orphans.forEach { uploadDao.deleteUploadById(it.id) }
+            addLog("Scanner", "${orphans.size} entrée(s) orpheline(s) nettoyée(s)")
+        }
+
         val allFiles = collectAudioFiles(folder)
         addLog("Scanner", "${allFiles.size} fichier(s) audio trouvé(s)")
 
@@ -458,7 +492,7 @@ class CallSyncRepository(private val context: Context) {
                         size = file.length(), status = "COMPLETED",
                         uploadedAt = System.currentTimeMillis())
                 )
-                addLog("Scanner", "Ignoré (serveur): ${file.name}")
+                addLog("Scanner", "Ignoré (serveur/client): ${file.name}")
                 continue
             }
 
@@ -612,6 +646,10 @@ class CallSyncRepository(private val context: Context) {
         }
         uploadDao.clearAllUploads()
         resetScanTimestamp()
+        // Clear in-memory cache so next scan does a fresh /known-hashes fetch
+        knownHashesCache = HashSet()
+        // Recreate monitored folder so the FileObserver doesn't lose its target
+        File(getMonitorFolderPath()).mkdirs()
         addLog("DeleteAll", "$deleted fichier(s) supprimé(s) + index vidé")
         deleted
     }
@@ -626,25 +664,26 @@ class CallSyncRepository(private val context: Context) {
             if (getAuthToken().isEmpty()) login()
             val token = "Bearer ${getAuthToken()}"
 
+            // GET /delete-commands/{deviceId} returns sha256_list and marks all as done atomically
             val response = getApi().getPendingCommands(token, phoneId)
             if (!response.isSuccessful) return@withContext
 
-            val commands = response.body() ?: return@withContext
-            if (commands.isEmpty()) return@withContext
+            val body = response.body() ?: return@withContext
+            val sha256List = body.sha256List
+            if (sha256List.isEmpty()) return@withContext
 
-            addLog("DeleteCmd", "${commands.size} ordre(s) de suppression reçu(s)")
+            addLog("DeleteCmd", "${sha256List.size} ordre(s) de suppression reçu(s)")
 
-            for (cmd in commands) {
+            for (sha256 in sha256List) {
                 try {
-                    val upload = uploadDao.getUploadBySha256(cmd.sha256)
+                    val upload = uploadDao.getUploadBySha256(sha256)
                     if (upload != null) {
                         val file = File(upload.path)
                         if (file.exists()) { file.delete(); addLog("DeleteCmd", "Supprimé: ${upload.name}") }
                         uploadDao.deleteUploadById(upload.id)
                     }
-                    getApi().acknowledgeDeleteCommand(token, cmd.id)
                 } catch (e: Exception) {
-                    addLog("DeleteCmd", "Échec SHA ${cmd.sha256}: ${e.message}", true)
+                    addLog("DeleteCmd", "Échec SHA $sha256: ${e.message}", true)
                 }
             }
         } catch (e: Exception) {

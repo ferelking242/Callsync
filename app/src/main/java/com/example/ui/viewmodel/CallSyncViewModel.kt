@@ -157,6 +157,8 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
             val deleted = repository.deleteAllLocalFilesAndIndex()
             _deleteAllResult.value = deleted
             _isDeletingAll.value = false
+            // Restart service so FileObserver re-attaches to the (now-recreated) folder
+            startService()
         }
     }
 

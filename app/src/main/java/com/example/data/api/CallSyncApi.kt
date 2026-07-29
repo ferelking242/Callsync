@@ -55,14 +55,27 @@ data class PurgeResponse(
     val total: Int
 )
 
-/** Deletion command queued by the Flutter client for this Android device */
+/**
+ * Response from GET /delete-commands/{device_id}.
+ * The server marks all returned commands as done atomically on this call.
+ */
 @JsonClass(generateAdapter = true)
-data class DeleteCommand(
-    val id: Long,
-    @Json(name = "device_id")    val deviceId: String,
-    val sha256: String,
-    @Json(name = "recording_id") val recordingId: Long,
-    @Json(name = "created_at")   val createdAt: String
+data class DeleteCommandsResponse(
+    @Json(name = "device_id")   val deviceId: String,
+    @Json(name = "sha256_list") val sha256List: List<String>,
+    val count: Int
+)
+
+/**
+ * Response from GET /known-hashes.
+ * Contains all SHA256s known to the server: files currently stored
+ * AND files already downloaded by Flutter clients.
+ * Used by the Kotlin recorder to skip re-uploading already-known files.
+ */
+@JsonClass(generateAdapter = true)
+data class KnownHashesResponse(
+    @Json(name = "sha256_list") val sha256List: List<String>,
+    val count: Int
 )
 
 // ── API Interface ─────────────────────────────────────────────────────────────
@@ -121,19 +134,27 @@ interface CallSyncApi {
     @GET("storage/stats")
     suspend fun getStorageStats(@Header("Authorization") token: String): Response<StorageStatsResponse>
 
+    // ── Known hashes (dedup) ──────────────────────────────────────────────────
+
+    /**
+     * Returns all SHA256s the server knows about:
+     * files currently stored + files already downloaded by Flutter clients.
+     * Call this before an upload batch to skip already-known files.
+     */
+    @GET("known-hashes")
+    suspend fun getKnownHashes(
+        @Header("Authorization") token: String
+    ): Response<KnownHashesResponse>
+
     // ── Delete-at-source commands ─────────────────────────────────────────────
 
-    /** Poll pending deletion commands for this device */
-    @GET("pending-commands/{deviceId}")
+    /**
+     * Poll pending deletion commands for this device.
+     * The server marks all returned commands as done atomically.
+     */
+    @GET("delete-commands/{deviceId}")
     suspend fun getPendingCommands(
         @Header("Authorization") token: String,
         @Path("deviceId") deviceId: String
-    ): Response<List<DeleteCommand>>
-
-    /** Acknowledge execution of a command so the server removes it */
-    @DELETE("delete-command/{id}")
-    suspend fun acknowledgeDeleteCommand(
-        @Header("Authorization") token: String,
-        @Path("id") id: Long
-    ): Response<ResponseBody>
+    ): Response<DeleteCommandsResponse>
 }

@@ -325,6 +325,17 @@ class CallUploadService : Service() {
                     // Renouveler le wake lock si nécessaire
                     if (wakeLock?.isHeld == false) acquireWakeLock()
 
+                    // ── FileObserver sanity check ──────────────────────────────────────
+                    // If the monitored folder was deleted (e.g. after a mass purge or an
+                    // OEM cleanup), FileObserver silently stops receiving events.
+                    // Re-create the folder and restart observers so scanning resumes.
+                    val rootFolder = File(repository.getMonitorFolderPath())
+                    if (!rootFolder.exists() || fileObservers.isEmpty()) {
+                        rootFolder.mkdirs()
+                        startMonitoring()
+                        repository.addLog("Watchdog", "FileObserver redémarré (dossier recréé: ${rootFolder.path})")
+                    }
+
                     repository.autoConnectIfNeeded()
                     val found = repository.scanFolderIncremental()
                     repository.retryFailedUploads()
