@@ -93,7 +93,7 @@ fun OnboardingScreen(
     var hasDeviceAdmin by remember {
         mutableStateOf(
             run {
-                val dpm  = context.getSystemService(Context.DEVICE_ADMIN_SERVICE) as DevicePolicyManager
+                val dpm  = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
                 val comp = ComponentName(context, CallDeviceAdminReceiver::class.java)
                 dpm.isAdminActive(comp)
             }
@@ -130,7 +130,7 @@ fun OnboardingScreen(
     val deviceAdminResult = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) {
-        val dpm  = context.getSystemService(Context.DEVICE_ADMIN_SERVICE) as DevicePolicyManager
+        val dpm  = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val comp = ComponentName(context, CallDeviceAdminReceiver::class.java)
         hasDeviceAdmin = dpm.isAdminActive(comp)
     }
