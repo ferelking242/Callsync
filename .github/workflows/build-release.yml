@@ -42,25 +42,18 @@ jobs:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD:   ${{ secrets.KEY_PASSWORD }}
         run: |
-          KEYSTORE_FILE="${{ github.workspace }}/my-upload-key.jks"
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            echo "Decoding keystore from secret..."
-            echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
-            echo "SIGN_STORE_PASS=$STORE_PASSWORD" >> $GITHUB_ENV
-            echo "SIGN_KEY_ALIAS=upload"            >> $GITHUB_ENV
-            echo "SIGN_KEY_PASS=$KEY_PASSWORD"      >> $GITHUB_ENV
-          else
-            echo "No KEYSTORE_BASE64 secret — generating ephemeral CI keystore"
-            keytool -genkey -v \
-              -keystore "$KEYSTORE_FILE" \
-              -alias upload -keyalg RSA -keysize 2048 -validity 30 \
-              -dname "CN=CI,OU=CI,O=CI,L=CI,ST=CI,C=US" \
-              -storepass ci_debug_pass -keypass ci_debug_pass -noprompt 2>/dev/null
-            echo "SIGN_STORE_PASS=ci_debug_pass" >> $GITHUB_ENV
-            echo "SIGN_KEY_ALIAS=upload"         >> $GITHUB_ENV
-            echo "SIGN_KEY_PASS=ci_debug_pass"   >> $GITHUB_ENV
+          # KEYSTORE_BASE64 doit toujours être défini — keystore permanent p12
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "ERREUR: le secret KEYSTORE_BASE64 est absent. Configurez-le dans les secrets du repo."
+            exit 1
           fi
-          echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> $GITHUB_ENV
+          KEYSTORE_FILE="${{ github.workspace }}/callsync-release.p12"
+          echo "Decoding permanent keystore from secret..."
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
+          echo "SIGN_STORE_PASS=$STORE_PASSWORD" >> $GITHUB_ENV
+          echo "SIGN_KEY_ALIAS=upload"            >> $GITHUB_ENV
+          echo "SIGN_KEY_PASS=$KEY_PASSWORD"      >> $GITHUB_ENV
+          echo "KEYSTORE_PATH=$KEYSTORE_FILE"     >> $GITHUB_ENV
 
       - name: Build Optimized Release APK
         env:
