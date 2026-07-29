@@ -9,6 +9,9 @@ import com.example.data.model.LogEntry
 import com.example.data.model.Upload
 import com.example.data.repository.CallSyncRepository
 import com.example.service.CallUploadService
+import com.example.update.UpdateManager
+import com.example.update.UpdateState
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +44,10 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     private val _connectionError           = MutableStateFlow("")
     val connectionError: StateFlow<String> = _connectionError
 
+    // ── Auto-update ───────────────────────────────────────────────────────────
+    private val updateManager = UpdateManager(context)
+    val updateState: StateFlow<UpdateState> = updateManager.state
+
     // ── Settings ──────────────────────────────────────────────────────────────
     val serverUrl     = MutableStateFlow(repository.getServerUrl())
     val username      = MutableStateFlow(repository.getUsername())
@@ -50,6 +57,14 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     init {
         viewModelScope.launch { repository.resetStuckUploads() }
         startService()
+        // Check for update on launch (delayed to not block startup)
+        viewModelScope.launch {
+            delay(5_000)
+            val result = updateManager.checkForUpdate()
+            if (result is UpdateState.Available) {
+                updateManager.showUpdateAvailableNotification(result.version)
+            }
+        }
     }
 
     // ── Service control ───────────────────────────────────────────────────────
@@ -163,4 +178,17 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun clearDeleteAllResult() { _deleteAllResult.value = null }
+
+    // ── Update ────────────────────────────────────────────────────────────────
+
+    fun checkUpdateManually() {
+        viewModelScope.launch { updateManager.checkForUpdate() }
+    }
+
+    fun downloadAndInstallUpdate(downloadUrl: String) {
+        viewModelScope.launch {
+            updateManager.downloadAndInstall(downloadUrl)
+            updateManager.dismissDownloadNotification()
+        }
+    }
 }

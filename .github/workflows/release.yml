@@ -1,0 +1,84 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'app/build.gradle.kts'   # Trigger uniquement quand la version change
+  workflow_dispatch:              # Déclenchement manuel aussi disponible
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write             # Nécessaire pour créer une release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Decode debug keystore
+        run: |
+          echo "${{ secrets.DEBUG_KEYSTORE_B64 || '' }}" | base64 -d > debug.keystore 2>/dev/null || true
+          # Fallback: use the base64 file committed to the repo
+          if [ ! -s debug.keystore ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Extract version name
+        id: version
+        run: |
+          VERSION=$(grep 'versionName' app/build.gradle.kts | grep -oP '"[^"]+"' | tr -d '"')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon
+        env:
+          STORE_PASSWORD: android
+          KEY_PASSWORD: android
+          KEYSTORE_PATH: ${{ github.workspace }}/debug.keystore
+
+      - name: Rename APK
+        run: |
+          mv app/build/outputs/apk/debug/app-debug.apk \
+             app/build/outputs/apk/debug/callsync-${{ steps.version.outputs.version }}.apk
+
+      - name: Delete existing release (if any)
+        continue-on-error: true
+        run: |
+          gh release delete ${{ steps.version.outputs.tag }} --yes || true
+          git push --delete origin ${{ steps.version.outputs.tag }} || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "CallSync ${{ steps.version.outputs.version }}"
+          body: |
+            ## CallSync ${{ steps.version.outputs.version }}
+            
+            Build automatique depuis la branche `main`.
+            
+            ### Installation
+            1. Télécharger `callsync-${{ steps.version.outputs.version }}.apk`
+            2. Ouvrir le fichier sur votre appareil Android
+            3. Autoriser l'installation depuis des sources inconnues si demandé
+            
+            > Les appareils ayant une version antérieure recevront une notification de mise à jour automatiquement.
+          files: app/build/outputs/apk/debug/callsync-${{ steps.version.outputs.version }}.apk
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

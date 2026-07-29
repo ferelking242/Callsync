@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.model.Upload
 import com.example.service.CallUploadService
 import com.example.ui.viewmodel.CallSyncViewModel
+import com.example.update.UpdateState
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -39,16 +40,46 @@ fun UploaderScreen(
     val connError       by viewModel.connectionError.collectAsState()
     val isOnline        by CallUploadService.isOnline.collectAsState()
 
-    val completed = remember(uploads) { uploads.count { it.status == "COMPLETED" } }
-    val pending   = remember(uploads) { uploads.count { it.status == "PENDING" } }
-    val failed    = remember(uploads) { uploads.count { it.status == "FAILED" } }
-    val uploading = remember(uploads) { uploads.count { it.status == "UPLOADING" } }
+    val completed   = remember(uploads) { uploads.count { it.status == "COMPLETED" } }
+    val pending     = remember(uploads) { uploads.count { it.status == "PENDING" } }
+    val failed      = remember(uploads) { uploads.count { it.status == "FAILED" } }
+    val uploading   = remember(uploads) { uploads.count { it.status == "UPLOADING" } }
+    val updateState by viewModel.updateState.collectAsState()
 
     LazyColumn(
         modifier = modifier,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // ── Update banner ───────────────────────────────────────────────────
+        when (val s = updateState) {
+            is UpdateState.Available -> item {
+                UpdateBanner(
+                    version    = s.version,
+                    onInstall  = { viewModel.downloadAndInstallUpdate(s.downloadUrl) },
+                    isLoading  = false,
+                    progress   = null
+                )
+            }
+            is UpdateState.Downloading -> item {
+                UpdateBanner(
+                    version    = "…",
+                    onInstall  = {},
+                    isLoading  = true,
+                    progress   = s.progress
+                )
+            }
+            is UpdateState.Installing -> item {
+                UpdateBanner(
+                    version    = "…",
+                    onInstall  = {},
+                    isLoading  = true,
+                    progress   = 100
+                )
+            }
+            else -> {}
+        }
+
         // ── Status row ─────────────────────────────────────────────────────
         item {
             Row(
@@ -427,6 +458,73 @@ private fun EmptyUploaderState() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
             textAlign = TextAlign.Center)
+    }
+}
+
+// ── Update banner ─────────────────────────────────────────────────────────────
+
+@Composable
+private fun UpdateBanner(
+    version:   String,
+    onInstall: () -> Unit,
+    isLoading: Boolean,
+    progress:  Int?
+) {
+    val containerColor = MaterialTheme.colorScheme.primaryContainer
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = containerColor,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                verticalAlignment    = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    Icons.Default.SystemUpdate,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint     = MaterialTheme.colorScheme.primary
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text  = if (isLoading) "Installation en cours…" else "Mise à jour v$version disponible",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    if (!isLoading) {
+                        Text(
+                            text  = "Appuyez pour mettre à jour automatiquement",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                if (!isLoading) {
+                    FilledTonalButton(
+                        onClick = onInstall,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        modifier = Modifier.height(32.dp)
+                    ) {
+                        Text("Mettre à jour", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+            if (isLoading && progress != null) {
+                Spacer(Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { progress / 100f },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text  = if (progress < 100) "Téléchargement… $progress%" else "Installation…",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
     }
 }
 

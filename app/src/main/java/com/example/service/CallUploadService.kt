@@ -484,10 +484,13 @@ class CallUploadService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID, "CallSync Monitor", NotificationManager.IMPORTANCE_LOW
+                CHANNEL_ID, "CallSync Monitor", NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "Surveillance & envoi automatique des enregistrements"
                 setShowBadge(false)
+                // Ne pas jouer de son pour les mises à jour de statut fréquentes
+                setSound(null, null)
+                enableVibration(false)
             }
             (getSystemService(NotificationManager::class.java))?.createNotificationChannel(channel)
         }
