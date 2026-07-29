@@ -5,6 +5,7 @@
     <!-- Network -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
 
     <!-- Foreground service -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -13,7 +14,7 @@
     <!-- Auto-start on boot & package replace -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- Alarms — exact alarm for service self-restart -->
+    <!-- Alarms — exact alarm for service self-restart heartbeat -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
@@ -73,13 +74,26 @@
             </intent-filter>
         </receiver>
 
-        <!-- Service restart receiver — catches AlarmManager alarm after unexpected kill -->
+        <!-- Service restart receiver — catches AlarmManager heartbeat alarms -->
         <receiver
             android:name=".service.ServiceRestartReceiver"
             android:enabled="true"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.example.RESTART_SERVICE" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Device admin — prevents OEM battery killers from force-stopping the service -->
+        <receiver
+            android:name=".service.CallDeviceAdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
             </intent-filter>
         </receiver>
 

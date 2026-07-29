@@ -3,6 +3,8 @@ package com.example.data.repository
 import android.content.Context
 import android.content.SharedPreferences
 import android.database.Cursor
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
@@ -92,13 +94,25 @@ class CallSyncRepository(private val context: Context) {
     fun isOnboardingCompleted(): Boolean = prefs.getBoolean("onboarding_completed", false)
     fun setOnboardingCompleted(b: Boolean) { prefs.edit().putBoolean("onboarding_completed", b).apply() }
 
+    // ── Réseau ────────────────────────────────────────────────────────────────
+
+    fun isNetworkAvailable(): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val net  = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        } else {
+            @Suppress("DEPRECATION")
+            cm.activeNetworkInfo?.isConnected == true
+        }
+    }
+
     // ── Scan timestamp — index incrémentiel ────────────────────────────────────
 
-    /** Timestamp du dernier scan complet réussi. 0 = jamais fait. */
     fun getLastScanTimestamp(): Long = prefs.getLong("last_scan_ts", 0L)
     private fun setLastScanTimestamp(ts: Long) { prefs.edit().putLong("last_scan_ts", ts).apply() }
-
-    /** Réinitialise le timestamp pour forcer un scan complet au prochain démarrage. */
     fun resetScanTimestamp() { prefs.edit().putLong("last_scan_ts", 0L).apply() }
 
     // ── Server SHA256 cache (dedup) ───────────────────────────────────────────
@@ -175,16 +189,11 @@ class CallSyncRepository(private val context: Context) {
         }
     }
 
-    /**
-     * Connexion automatique + refresh du cache SHA256.
-     * Appelé au démarrage du service — silencieux en cas d'échec réseau.
-     */
+    /** Connexion automatique + refresh du cache SHA256 (silencieux). */
     suspend fun autoConnectIfNeeded() = withContext(Dispatchers.IO) {
         try {
             val (ok, _) = login()
-            if (ok) {
-                refreshServerSha256Cache()
-            }
+            if (ok) refreshServerSha256Cache()
         } catch (e: Exception) {
             addLog("AutoConnect", "Auto-connexion échouée: ${e.message}", true)
         }
@@ -205,9 +214,11 @@ class CallSyncRepository(private val context: Context) {
         }
     }
 
-    // ── Upload (parallèle, dédup) ─────────────────────────────────────────────
+    // ── Upload (parallèle dynamique, dédup) ───────────────────────────────────
 
     suspend fun uploadPendingFiles(): Int = withContext(Dispatchers.IO) {
+        if (!isNetworkAvailable()) return@withContext 0
+
         if (getAuthToken().isEmpty()) {
             val (ok, err) = login()
             if (!ok) {
@@ -219,9 +230,17 @@ class CallSyncRepository(private val context: Context) {
         val pending = uploadDao.getPendingUploads()
         if (pending.isEmpty()) return@withContext 0
 
-        val CONCURRENCY = 4
+        // Parallélisme dynamique : plus on a de fichiers, plus on parallélise
+        val concurrency = when {
+            pending.size >= 100 -> 16
+            pending.size >= 30  -> 12
+            pending.size >= 10  -> 8
+            else                -> 4
+        }
+        addLog("Uploader", "Upload de ${pending.size} fichier(s) — $concurrency en parallèle")
+
         var uploaded = 0
-        pending.chunked(CONCURRENCY).forEach { chunk ->
+        pending.chunked(concurrency).forEach { chunk ->
             coroutineScope {
                 val results = chunk.map { upload -> async { uploadSingle(upload) } }.awaitAll()
                 uploaded += results.count { it }
@@ -306,16 +325,12 @@ class CallSyncRepository(private val context: Context) {
         }
     }
 
-    // ── Index incrémentiel — chargé 1 fois, mis à jour en delta ───────────────
+    // ── Index incrémentiel ────────────────────────────────────────────────────
 
     /**
-     * Scan incrémentiel : la première fois, parcourt tout le dossier.
-     * Les fois suivantes, ne vérifie que les fichiers modifiés depuis le dernier scan.
-     * Le FileObserver gère les ajouts en temps réel — ce scan couvre les fichiers
-     * créés pendant que le service était arrêté (reboot, kill forcé, etc.).
-     *
-     * L'index Room (table uploads) est la source de vérité persistante :
-     * on l'édite (INSERT/UPDATE), on ne le recharge jamais en entier depuis le disque.
+     * Scan incrémentiel : 1er appel = scan complet, suivants = seulement les fichiers
+     * modifiés depuis le dernier scan. Le FileObserver gère le temps réel.
+     * L'index Room est la source de vérité — on ne le recharge jamais en entier.
      */
     suspend fun scanFolderIncremental(): Int = withContext(Dispatchers.IO) {
         val folderPath = getMonitorFolderPath()
@@ -326,12 +341,10 @@ class CallSyncRepository(private val context: Context) {
             return@withContext 0
         }
 
-        val lastScanTs = getLastScanTimestamp()
-        val now        = System.currentTimeMillis()
+        val lastScanTs  = getLastScanTimestamp()
+        val now         = System.currentTimeMillis()
         val isFirstScan = lastScanTs == 0L
-
-        // Fenêtre de 5 s de marge pour éviter de rater des fichiers en cours d'écriture
-        val cutoff = if (isFirstScan) 0L else lastScanTs - 5_000L
+        val cutoff      = if (isFirstScan) 0L else lastScanTs - 5_000L
 
         val filesToCheck = mutableListOf<File>()
         folder.walkTopDown().maxDepth(3).forEach { entry ->
@@ -341,19 +354,16 @@ class CallSyncRepository(private val context: Context) {
         }
 
         if (isFirstScan) {
-            addLog("Scanner", "Premier scan: ${filesToCheck.size} fichier(s) audio trouvé(s)")
+            addLog("Scanner", "Premier scan: ${filesToCheck.size} fichier(s) audio")
         } else if (filesToCheck.isNotEmpty()) {
             addLog("Scanner", "Scan delta: ${filesToCheck.size} fichier(s) à vérifier")
         }
 
         var addedCount = 0
         for (file in filesToCheck) {
-            // Déjà dans l'index par chemin ?
             if (uploadDao.getUploadByPath(file.absolutePath) != null) continue
-
             val sha256 = calculateSHA256(file)
 
-            // Déjà complété (fichier renommé / déplacé) ?
             val existingBySha = uploadDao.getUploadBySha256(sha256)
             if (existingBySha != null && existingBySha.status == "COMPLETED") {
                 uploadDao.insertUpload(
@@ -364,7 +374,6 @@ class CallSyncRepository(private val context: Context) {
                 continue
             }
 
-            // Déjà sur le serveur (cache SHA256) ?
             if (isOnServer(sha256)) {
                 uploadDao.insertUpload(
                     Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
@@ -374,7 +383,6 @@ class CallSyncRepository(private val context: Context) {
                 continue
             }
 
-            // Vraiment nouveau — on l'ajoute à la queue
             val inserted = uploadDao.insertUpload(
                 Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
                     size = file.length(), status = "PENDING")
@@ -390,10 +398,7 @@ class CallSyncRepository(private val context: Context) {
         addedCount
     }
 
-    /**
-     * Scan complet (ignores timestamp) — utilisé par le bouton manuel dans l'UI.
-     * Ne réinitialise PAS le timestamp.
-     */
+    /** Scan complet (bouton manuel dans l'UI). */
     suspend fun scanFolderManually(): Int = withContext(Dispatchers.IO) {
         val folderPath = getMonitorFolderPath()
         val folder = File(folderPath)
@@ -581,19 +586,15 @@ class CallSyncRepository(private val context: Context) {
             }
         }
         uploadDao.clearAllUploads()
-        resetScanTimestamp()  // force re-scan au prochain démarrage
+        resetScanTimestamp()
         addLog("DeleteAll", "$deleted fichier(s) supprimé(s) + index vidé")
         deleted
     }
 
     // ── Delete-at-source polling ───────────────────────────────────────────────
 
-    /**
-     * Interroge le serveur pour des ordres de suppression adressés à cet appareil.
-     * Pour chaque ordre : trouve le fichier local par SHA256, le supprime, accuse réception.
-     * Retire l'entrée de l'index local — pas de re-scan nécessaire.
-     */
     suspend fun pollAndExecuteDeleteCommands() = withContext(Dispatchers.IO) {
+        if (!isNetworkAvailable()) return@withContext
         try {
             val phoneId = getPhoneId()
             if (phoneId.isEmpty()) return@withContext
@@ -614,10 +615,8 @@ class CallSyncRepository(private val context: Context) {
                     if (upload != null) {
                         val file = File(upload.path)
                         if (file.exists()) { file.delete(); addLog("DeleteCmd", "Supprimé: ${upload.name}") }
-                        // Retirer de l'index — pas de re-scan
                         uploadDao.deleteUploadById(upload.id)
                     }
-                    // Accuser réception même si le fichier est déjà supprimé
                     getApi().acknowledgeDeleteCommand(token, cmd.id)
                 } catch (e: Exception) {
                     addLog("DeleteCmd", "Échec SHA ${cmd.sha256}: ${e.message}", true)

@@ -2,6 +2,8 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.admin.DevicePolicyManager
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -35,12 +37,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import com.example.MainActivity
+import com.example.service.CallDeviceAdminReceiver
 import com.example.ui.viewmodel.CallSyncViewModel
 
 @SuppressLint("BatteryLife")
 @Composable
 fun OnboardingScreen(
-    viewModel: CallSyncViewModel,
+    viewModel:  CallSyncViewModel,
+    activity:   MainActivity,
     onComplete: () -> Unit
 ) {
     val context = LocalContext.current
@@ -85,19 +90,25 @@ fun OnboardingScreen(
         )
     }
 
+    var hasDeviceAdmin by remember {
+        mutableStateOf(
+            run {
+                val dpm  = context.getSystemService(Context.DEVICE_ADMIN_SERVICE) as DevicePolicyManager
+                val comp = ComponentName(context, CallDeviceAdminReceiver::class.java)
+                dpm.isAdminActive(comp)
+            }
+        )
+    }
+
     // ── Permission launchers ──────────────────────────────────────────────────
 
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasNotificationPermission = granted
-    }
+    ) { granted -> hasNotificationPermission = granted }
 
     val storageLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        hasStoragePermission = granted
-    }
+    ) { granted -> hasStoragePermission = granted }
 
     val manageStorageResult = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -116,9 +127,20 @@ fun OnboardingScreen(
         }
     }
 
-    // Auto-request permissions as soon as we land on page 1
+    val deviceAdminResult = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        val dpm  = context.getSystemService(Context.DEVICE_ADMIN_SERVICE) as DevicePolicyManager
+        val comp = ComponentName(context, CallDeviceAdminReceiver::class.java)
+        hasDeviceAdmin = dpm.isAdminActive(comp)
+    }
+
+    // ── Auto-request on page 1 arrival ────────────────────────────────────────
+    // Les permissions sont demandées UNIQUEMENT quand l'utilisateur est sur la page dédiée
+
     LaunchedEffect(currentPage) {
         if (currentPage == 1) {
+            // Demander notification en premier — la plus simple
             if (!hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
@@ -181,6 +203,7 @@ fun OnboardingScreen(
                             hasStorage      = hasStoragePermission,
                             hasBattery      = hasBatteryExemption,
                             hasManageAll    = hasManageStorage,
+                            hasDeviceAdmin  = hasDeviceAdmin,
                             onRequestNotification = {
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                                     notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -226,6 +249,21 @@ fun OnboardingScreen(
                                         Toast.makeText(context, "Activez 'Accès à tous les fichiers' manuellement.", Toast.LENGTH_LONG).show()
                                     }
                                 } else hasManageStorage = true
+                            },
+                            onRequestDeviceAdmin = {
+                                try {
+                                    deviceAdminResult.launch(
+                                        Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                                            putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+                                                ComponentName(context, CallDeviceAdminReceiver::class.java))
+                                            putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                                                "Empêche les gestionnaires de batterie OEM (MIUI, One UI, etc.) " +
+                                                "de tuer le service d'upload en arrière-plan.")
+                                        }
+                                    )
+                                } catch (_: Exception) {
+                                    Toast.makeText(context, "Impossible d'activer l'admin appareil.", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         )
                         2 -> SlideReady()
@@ -240,7 +278,6 @@ fun OnboardingScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.padding(bottom = 24.dp)
             ) {
-                // Page dots
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     repeat(3) { index ->
                         val isSelected = index == currentPage
@@ -360,10 +397,12 @@ fun SlidePermissions(
     hasStorage: Boolean,
     hasBattery: Boolean,
     hasManageAll: Boolean,
+    hasDeviceAdmin: Boolean,
     onRequestNotification: () -> Unit,
     onRequestStorage: () -> Unit,
     onRequestBattery: () -> Unit,
-    onRequestManageAll: () -> Unit
+    onRequestManageAll: () -> Unit,
+    onRequestDeviceAdmin: () -> Unit
 ) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -386,7 +425,7 @@ fun SlidePermissions(
 
         PermissionItemCard(
             title       = "Notifications",
-            description = "Affiche la notification de fond permanente qui empêche Android de tuer le service.",
+            description = "Notification permanente qui empêche Android de tuer le service.",
             isGranted   = hasNotification,
             onClick     = onRequestNotification,
             icon        = Icons.Default.Notifications
@@ -394,7 +433,7 @@ fun SlidePermissions(
 
         PermissionItemCard(
             title       = "Accès aux fichiers audio",
-            description = "Lecture des enregistrements (.m4a, .mp3, .wav…) pour les envoyer automatiquement.",
+            description = "Lecture des enregistrements (.m4a, .mp3, .wav…) pour l'envoi automatique.",
             isGranted   = hasStorage,
             onClick     = onRequestStorage,
             icon        = Icons.Default.FolderOpen
@@ -403,7 +442,7 @@ fun SlidePermissions(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             PermissionItemCard(
                 title       = "Accès à tous les fichiers (Android 11+)",
-                description = "Nécessaire pour lire les dossiers d'applications tierces (MIUI, Samsung, etc.).",
+                description = "Nécessaire pour lire les dossiers MIUI, Samsung, Huawei, etc.",
                 isGranted   = hasManageAll,
                 onClick     = onRequestManageAll,
                 icon        = Icons.Default.Storage
@@ -412,10 +451,18 @@ fun SlidePermissions(
 
         PermissionItemCard(
             title       = "Exempter de l'optimisation batterie",
-            description = "Permet à CallSync de fonctionner même quand l'écran est éteint (Android Doze).",
+            description = "Permet à CallSync de fonctionner même quand l'écran est éteint (Doze).",
             isGranted   = hasBattery,
             onClick     = onRequestBattery,
             icon        = Icons.Default.BatteryChargingFull
+        )
+
+        PermissionItemCard(
+            title       = "Administrateur de l'appareil",
+            description = "Empêche les gestionnaires OEM (MIUI, One UI…) de tuer le service. Recommandé.",
+            isGranted   = hasDeviceAdmin,
+            onClick     = onRequestDeviceAdmin,
+            icon        = Icons.Default.AdminPanelSettings
         )
     }
 }
@@ -520,10 +567,11 @@ fun SlideReady() {
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
         ) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SummaryRow(Icons.Default.FolderOpen, "Surveille le dossier configuré")
-                SummaryRow(Icons.Default.Upload, "Envoie jusqu'à 4 fichiers en parallèle")
+                SummaryRow(Icons.Default.FolderOpen, "Surveille le dossier configuré en temps réel")
+                SummaryRow(Icons.Default.Upload, "Jusqu'à 16 fichiers envoyés en parallèle")
                 SummaryRow(Icons.Default.Block, "Ne recharge jamais deux fois le même fichier")
-                SummaryRow(Icons.Default.RestartAlt, "Redémarre automatiquement après un crash")
+                SummaryRow(Icons.Default.RestartAlt, "Redémarre automatiquement (boot, crash, swipe)")
+                SummaryRow(Icons.Default.Wifi, "Reprend automatiquement à la reconnexion réseau")
             }
         }
     }
