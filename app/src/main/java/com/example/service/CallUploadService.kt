@@ -21,6 +21,9 @@ import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.example.MainActivity
@@ -50,13 +53,17 @@ class CallUploadService : Service() {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     companion object {
-        private const val CHANNEL_ID           = "CallSyncServiceChannel"
-        private const val NOTIFICATION_ID      = 1001
-        private const val RESTART_ACTION       = "com.example.RESTART_SERVICE"
-        private const val WORK_NAME            = "CallSyncPeriodicWorker"
-        private const val HEARTBEAT_REQUEST    = 9001  // PendingIntent request code for heartbeat
+        private const val CHANNEL_ID            = "CallSyncServiceChannel"
+        private const val NOTIFICATION_ID       = 1001
+        private const val RESTART_ACTION        = "com.example.RESTART_SERVICE"
+        private const val WORK_NAME_PERIODIC    = "CallSyncPeriodicWorker"
+        private const val WORK_NAME_IMMEDIATE   = "CallSyncImmediateWorker"
+        private const val HEARTBEAT_REQUEST     = 9001
         private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1_000L   // 2 min heartbeat alarm
         private const val WATCHDOG_INTERVAL_MS  = 15 * 60 * 1_000L  // 15 min watchdog coroutine
+        // Wake lock renouvelé 2 min avant expiry (toutes les 28 min sur une durée de 30)
+        private const val WAKELOCK_DURATION_MS  = 30 * 60 * 1_000L
+        private const val WAKELOCK_RENEW_MS     = 28 * 60 * 1_000L
 
         val isRunning      = MutableStateFlow(false)
         val lastUploadTime = MutableStateFlow<Long?>(null)
@@ -76,41 +83,33 @@ class CallUploadService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Show notification immediately so foreground is satisfied before any async work
         startForegroundCompat("Démarrage…")
-
-        // Renew the 2-min heartbeat alarm — ensures we restart even if killed without callbacks
         scheduleHeartbeatAlarm()
 
         serviceScope.launch {
-            // 1. Connexion auto + refresh cache SHA256
             repository.addLog("Service", "Démarrage — connexion automatique…")
             repository.autoConnectIfNeeded()
             updateNotification("Surveillance active")
-
-            // 2. Réinitialiser les uploads bloqués en UPLOADING (crash précédent)
             repository.resetStuckUploads()
-
-            // 3. Scan incrémentiel (delta depuis le dernier scan)
             val found = repository.scanFolderIncremental()
             if (found > 0) updateNotification("$found fichier(s) en queue…")
-
-            // 4. Upload immédiat si réseau disponible
             triggerUploadQueue()
         }
 
         startMonitoring()
         startWatchdog()
+        startWakeLockRenewer()
 
         return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        // Swipe depuis le gestionnaire — programmer un redémarrage très rapide (500 ms)
+        // Swipe recents → redémarrage très rapide
         scheduleRestartAlarm(requestCode = 9002, delayMs = 500L)
-        // Garder aussi le heartbeat normal
         scheduleHeartbeatAlarm()
+        // Déclencher aussi le worker expedited pour reprendre rapidement
+        triggerExpeditedWorker()
     }
 
     override fun onDestroy() {
@@ -119,34 +118,44 @@ class CallUploadService : Service() {
         unregisterNetworkCallback()
         watchdogJob?.cancel()
         serviceJob.cancel()
-        wakeLock?.release()
+        wakeLock?.let { if (it.isHeld) it.release() }
         isRunning.value = false
-        // Redémarrage immédiat
         scheduleRestartAlarm(requestCode = 9003, delayMs = 500L)
+        triggerExpeditedWorker()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     // ── Wake lock ─────────────────────────────────────────────────────────────
+    // Durée 30 min, renouvelé toutes les 28 min → jamais expiré pendant un batch d'uploads
 
     private fun acquireWakeLock() {
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock?.release()
+            wakeLock?.let { if (it.isHeld) it.release() }
             wakeLock = pm.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "CallSync::UploadWakeLock"
-            ).apply { acquire(10 * 60 * 1_000L) }
+            ).apply { acquire(WAKELOCK_DURATION_MS) }
         } catch (_: Exception) {}
     }
 
-    // ── Network callback — déclenche l'upload dès que le réseau revient ───────
+    /** Coroutine qui renouvelle le wake lock 2 min avant son expiry. */
+    private fun startWakeLockRenewer() {
+        serviceScope.launch {
+            while (true) {
+                delay(WAKELOCK_RENEW_MS)
+                acquireWakeLock()
+            }
+        }
+    }
+
+    // ── Network callback ──────────────────────────────────────────────────────
 
     private fun registerNetworkCallback() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             try {
                 val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                // Init de l'état actuel
                 isOnline.value = isNetworkAvailable()
 
                 networkCallback = object : ConnectivityManager.NetworkCallback() {
@@ -198,7 +207,7 @@ class CallUploadService : Service() {
         }
     }
 
-    // ── FileObserver — nouveaux fichiers en temps réel ────────────────────────
+    // ── FileObserver ──────────────────────────────────────────────────────────
 
     private fun startMonitoring() {
         stopObservers()
@@ -232,7 +241,7 @@ class CallUploadService : Service() {
 
         repository.addLog("Service", "Nouveau fichier: ${file.name} — attente stabilisation…")
 
-        // Attendre stabilisation (taille constante 2 checks)
+        // Attendre stabilisation (taille constante 2 checks consécutifs)
         var previousSize = -1L
         var stableCount  = 0
         run stabilityCheck@{
@@ -283,13 +292,13 @@ class CallUploadService : Service() {
         uploadJob = serviceScope.launch {
             delay(300)
 
-            // Ne pas tenter si hors ligne
             if (!isNetworkAvailable()) {
                 repository.addLog("Uploader", "Hors ligne — upload différé")
                 updateNotification("Hors ligne — en attente de connexion")
                 return@launch
             }
 
+            // Renouveler le wake lock avant un potentiellement long batch d'uploads
             acquireWakeLock()
 
             val uploaded = repository.uploadPendingFiles()
@@ -305,7 +314,7 @@ class CallUploadService : Service() {
         }
     }
 
-    // ── Watchdog — reconnexion + scan delta + retry toutes les 15 min ────────
+    // ── Watchdog 15 min ───────────────────────────────────────────────────────
 
     private fun startWatchdog() {
         watchdogJob?.cancel()
@@ -313,12 +322,14 @@ class CallUploadService : Service() {
             while (true) {
                 delay(WATCHDOG_INTERVAL_MS)
                 try {
+                    // Renouveler le wake lock si nécessaire
+                    if (wakeLock?.isHeld == false) acquireWakeLock()
+
                     repository.autoConnectIfNeeded()
                     val found = repository.scanFolderIncremental()
                     repository.retryFailedUploads()
                     repository.pollAndExecuteDeleteCommands()
                     triggerUploadQueue()
-                    // Renouveler le heartbeat
                     scheduleHeartbeatAlarm()
                     if (found > 0) repository.addLog("Watchdog", "$found nouveau(x) fichier(s)")
                 } catch (e: Exception) {
@@ -328,13 +339,12 @@ class CallUploadService : Service() {
         }
     }
 
-    // ── Heartbeat alarm (2 min) — redémarre même si killed sans callback ──────
+    // ── Heartbeat alarm — redémarre même si killed sans callback ──────────────
+    //
+    // CORRECTION Android 12+ : canScheduleExactAlarms() peut retourner false si
+    // l'utilisateur n'a pas accordé SCHEDULE_EXACT_ALARM.
+    // → Fallback sur setAndAllowWhileIdle() (inexact mais garanti)
 
-    /**
-     * Planifie une alarme dans 2 min qui appellera startForegroundService().
-     * Renouvelée à chaque onStartCommand → boucle auto-réparatrice.
-     * Si le process est tué sans onDestroy/onTaskRemoved, l'alarme redémarre le service.
-     */
     private fun scheduleHeartbeatAlarm() {
         scheduleRestartAlarm(requestCode = HEARTBEAT_REQUEST, delayMs = HEARTBEAT_INTERVAL_MS)
     }
@@ -350,22 +360,44 @@ class CallUploadService : Service() {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val triggerAt = SystemClock.elapsedRealtime() + delayMs
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                alarmManager.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
-            } else {
-                alarmManager.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+
+            when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+                    // Android 12+ : vérifier la permission avant d'utiliser setExact
+                    if (alarmManager.canScheduleExactAlarms()) {
+                        alarmManager.setExactAndAllowWhileIdle(
+                            AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                    } else {
+                        // Fallback inexact — toujours déclenché, juste avec ±quelques minutes de délai
+                        alarmManager.setAndAllowWhileIdle(
+                            AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                    }
+                }
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                }
+                else -> {
+                    alarmManager.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                }
             }
         } catch (_: Exception) {
+            // Dernier recours : alarme inexacte sans exception
             try {
                 val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
                 val intent = Intent(this, ServiceRestartReceiver::class.java).apply { action = RESTART_ACTION }
                 val pi = PendingIntent.getBroadcast(this, requestCode, intent, PendingIntent.FLAG_IMMUTABLE)
-                alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 10_000L, pi)
+                alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    SystemClock.elapsedRealtime() + 10_000L, pi)
             } catch (_: Exception) {}
         }
     }
 
-    // ── WorkManager backup (toutes les 15 min) ────────────────────────────────
+    // ── WorkManager : périodique + expedited pour relance immédiate ───────────
+    //
+    // Android 12+ introduit le "Expedited Work" — s'exécute immédiatement même
+    // en battery saver, équivalent à un foreground service temporaire.
+    // Les grandes apps (Signal, Nextcloud, Syncthing) utilisent ce pattern.
 
     private fun scheduleWorkManagerBackup() {
         try {
@@ -373,8 +405,26 @@ class CallUploadService : Service() {
                 .setConstraints(Constraints.NONE)
                 .build()
             WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-                WORK_NAME,
+                WORK_NAME_PERIODIC,
                 ExistingPeriodicWorkPolicy.KEEP,
+                request
+            )
+        } catch (_: Exception) {}
+    }
+
+    /**
+     * Lance un worker one-shot expedited immédiatement.
+     * Utilisé après onTaskRemoved/onDestroy pour reprendre le travail ASAP
+     * même si le service foreground met quelques secondes à redémarrer.
+     */
+    private fun triggerExpeditedWorker() {
+        try {
+            val request = OneTimeWorkRequestBuilder<CallSyncWorker>()
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .build()
+            WorkManager.getInstance(this).enqueueUniqueWork(
+                WORK_NAME_IMMEDIATE,
+                ExistingWorkPolicy.REPLACE,
                 request
             )
         } catch (_: Exception) {}

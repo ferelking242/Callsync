@@ -19,7 +19,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -142,6 +146,7 @@ class CallSyncRepository(private val context: Context) {
     }
 
     // ── Retrofit / API ────────────────────────────────────────────────────────
+    // OkHttp configuré pour 20 connexions parallèles (défaut = 5, trop peu pour 16 uploads)
 
     @Volatile private var cachedApi: CallSyncApi? = null
     @Volatile private var cachedUrl: String? = null
@@ -150,11 +155,24 @@ class CallSyncRepository(private val context: Context) {
         val url = getServerUrl()
         synchronized(this) {
             if (cachedApi != null && cachedUrl == url) return cachedApi!!
+
+            // Dispatcher : 20 requêtes simultanées max (vs défaut 5 par host)
+            val dispatcher = Dispatcher().apply {
+                maxRequests        = 20
+                maxRequestsPerHost = 20
+            }
+            // Pool de connexions persistantes : 20 sockets, TTL 5 min
+            val connectionPool = ConnectionPool(20, 5, TimeUnit.MINUTES)
+
             val client = OkHttpClient.Builder()
+                .dispatcher(dispatcher)
+                .connectionPool(connectionPool)
                 .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .writeTimeout(120, TimeUnit.SECONDS)
+                .readTimeout(120, TimeUnit.SECONDS)   // Long pour gros fichiers
+                .writeTimeout(180, TimeUnit.SECONDS)  // Long pour gros fichiers en upload
+                .retryOnConnectionFailure(true)
                 .build()
+
             val retrofit = Retrofit.Builder()
                 .baseUrl(url)
                 .client(client)
@@ -214,7 +232,12 @@ class CallSyncRepository(private val context: Context) {
         }
     }
 
-    // ── Upload (parallèle dynamique, dédup) ───────────────────────────────────
+    // ── Upload (vrai parallélisme via Semaphore, pas des batches séries) ───────
+    //
+    // AVANT  : chunked(concurrency).forEach { batch -> awaitAll() }
+    //          → chaque batch attend son fichier le plus lent avant de démarrer le suivant
+    // APRÈS  : Semaphore(concurrency) — dès qu'un slot se libère, le suivant démarre immédiatement
+    //          → vrais N uploads simultanés en streaming
 
     suspend fun uploadPendingFiles(): Int = withContext(Dispatchers.IO) {
         if (!isNetworkAvailable()) return@withContext 0
@@ -230,21 +253,22 @@ class CallSyncRepository(private val context: Context) {
         val pending = uploadDao.getPendingUploads()
         if (pending.isEmpty()) return@withContext 0
 
-        // Parallélisme dynamique : plus on a de fichiers, plus on parallélise
+        // Parallélisme dynamique selon la taille de la queue
         val concurrency = when {
             pending.size >= 100 -> 16
             pending.size >= 30  -> 12
             pending.size >= 10  -> 8
             else                -> 4
         }
-        addLog("Uploader", "Upload de ${pending.size} fichier(s) — $concurrency en parallèle")
+        addLog("Uploader", "Upload de ${pending.size} fichier(s) — $concurrency slots parallèles")
 
-        var uploaded = 0
-        pending.chunked(concurrency).forEach { chunk ->
-            coroutineScope {
-                val results = chunk.map { upload -> async { uploadSingle(upload) } }.awaitAll()
-                uploaded += results.count { it }
-            }
+        // Semaphore : vrai streaming — un nouveau slot démarre immédiatement quand un finit
+        val semaphore = Semaphore(concurrency)
+        val uploaded: Int = coroutineScope {
+            pending
+                .map { upload -> async { semaphore.withPermit { uploadSingle(upload) } } }
+                .awaitAll()
+                .count { it }
         }
         uploaded
     }
@@ -257,7 +281,8 @@ class CallSyncRepository(private val context: Context) {
             return false
         }
         return try {
-            val sha256 = calculateSHA256(file)
+            // SHA256 déjà calculé lors du scan et stocké en DB — pas de recalcul inutile
+            val sha256 = upload.sha256
 
             if (isOnServer(sha256)) {
                 uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
