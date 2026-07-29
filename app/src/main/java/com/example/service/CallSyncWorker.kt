@@ -5,10 +5,12 @@ import android.content.Intent
 import android.os.Build
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import com.example.data.repository.CallSyncRepository
 
 /**
- * WorkManager periodic worker — runs every 15 min as a reliability backstop.
- * Ensures the foreground service is alive even if the alarm was missed.
+ * WorkManager periodic worker — filet de sécurité toutes les 15 min.
+ * Garantit que le service foreground tourne même si AlarmManager a raté.
+ * Utilise le scan incrémentiel pour ne vérifier que les fichiers nouveaux.
  */
 class CallSyncWorker(
     appContext: Context,
@@ -16,17 +18,24 @@ class CallSyncWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result {
-        val repository = com.example.data.repository.CallSyncRepository(applicationContext)
-        repository.addLog("Worker", "WorkManager heartbeat — ensuring service is running")
+        val repository = CallSyncRepository(applicationContext)
+        repository.addLog("Worker", "WorkManager heartbeat")
 
         return try {
-            // Scan for any new files created while service was offline
-            val added = repository.scanFolderManually()
-            if (added > 0) {
-                repository.addLog("Worker", "WorkManager discovered $added new file(s)")
-            }
+            // Connexion silencieuse si le token est expiré
+            repository.autoConnectIfNeeded()
 
-            // Restart the foreground service if it is not running
+            // Scan delta — seulement les fichiers créés depuis le dernier scan
+            val added = repository.scanFolderIncremental()
+            if (added > 0) repository.addLog("Worker", "$added nouveau(x) fichier(s) en queue")
+
+            // Retry les fichiers en échec
+            repository.retryFailedUploads()
+
+            // Poll des ordres de suppression
+            repository.pollAndExecuteDeleteCommands()
+
+            // S'assurer que le service foreground est vivant
             val serviceIntent = Intent(applicationContext, CallUploadService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 applicationContext.startForegroundService(serviceIntent)
@@ -36,7 +45,7 @@ class CallSyncWorker(
 
             Result.success()
         } catch (e: Exception) {
-            repository.addLog("Worker", "WorkManager job failed: ${e.message}", true)
+            repository.addLog("Worker", "WorkManager job échoué: ${e.message}", true)
             Result.retry()
         }
     }

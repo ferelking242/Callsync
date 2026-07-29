@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.FileObserver
 import android.os.IBinder
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.work.Constraints
@@ -36,16 +37,20 @@ class CallUploadService : Service() {
     private val serviceJob   = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.IO + serviceJob)
     private lateinit var repository: CallSyncRepository
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private val fileObservers = mutableListOf<CustomFileObserver>()
-    private var uploadJob: Job? = null
-    private var retryJob: Job? = null
+    private var uploadJob:   Job? = null
+    private var watchdogJob: Job? = null
 
     companion object {
-        private const val CHANNEL_ID       = "CallSyncServiceChannel"
-        private const val NOTIFICATION_ID  = 1001
-        private const val RESTART_ACTION   = "com.example.RESTART_SERVICE"
-        private const val WORK_NAME        = "CallSyncPeriodicWorker"
+        private const val CHANNEL_ID      = "CallSyncServiceChannel"
+        private const val NOTIFICATION_ID = 1001
+        private const val RESTART_ACTION  = "com.example.RESTART_SERVICE"
+        private const val WORK_NAME       = "CallSyncPeriodicWorker"
+
+        // Intervalle watchdog : re-connexion + scan delta toutes les 15 min
+        private const val WATCHDOG_INTERVAL_MS = 15 * 60 * 1_000L
 
         val isRunning      = MutableStateFlow(false)
         val lastUploadTime = MutableStateFlow<Long?>(null)
@@ -58,53 +63,80 @@ class CallUploadService : Service() {
         repository = CallSyncRepository(this)
         isRunning.value = true
         createNotificationChannel()
+        acquireWakeLock()
         scheduleWorkManagerBackup()
-        serviceScope.launch { repository.addLog("Service", "Foreground service created") }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundCompat()
+
         serviceScope.launch {
-            repository.addLog("Service", "Service started — scanning & monitoring")
-            val found = repository.scanFolderManually()
-            if (found > 0) repository.addLog("Service", "Initial scan: $found new file(s)")
+            // 1. Connexion automatique au serveur + refresh cache SHA256 (silencieux)
+            repository.addLog("Service", "Démarrage — connexion automatique au serveur…")
+            repository.autoConnectIfNeeded()
+
+            // 2. Réinitialiser les uploads bloqués en UPLOADING (crash précédent)
+            repository.resetStuckUploads()
+
+            // 3. Scan incrémentiel — seulement les fichiers nouveaux depuis le dernier scan
+            //    Premier démarrage = scan complet ; suivants = delta uniquement
+            val found = repository.scanFolderIncremental()
+            if (found > 0) repository.addLog("Service", "$found nouveau(x) fichier(s) détecté(s)")
+
+            // 4. Lancer l'upload de tout ce qui est en queue
             triggerUploadQueue()
         }
+
+        // Surveiller le dossier en temps réel (nouveaux fichiers → index + upload immédiat)
         startMonitoring()
-        startPeriodicRetry()
-        // START_STICKY: OS restarts this service with null intent after kill
+
+        // Watchdog : re-connexion + scan delta + retry périodiques
+        startWatchdog()
+
+        // START_STICKY : l'OS redémarre le service automatiquement après un kill
         return START_STICKY
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        // App swiped from recents — schedule alarm restart in 3 s (ntfy pattern)
+        // App balayée du gestionnaire de tâches → alarme de redémarrage dans 3 s
         scheduleAlarmRestart(delayMs = 3_000L)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         stopObservers()
-        retryJob?.cancel()
+        watchdogJob?.cancel()
         serviceJob.cancel()
+        wakeLock?.release()
         isRunning.value = false
-        // Schedule restart via AlarmManager so we survive unexpected kills
+        // Redémarrage via AlarmManager si le service est tué de façon inattendue
         scheduleAlarmRestart(delayMs = 1_500L)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // ── Monitoring ────────────────────────────────────────────────────────────
+    // ── Wake lock — empêche le CPU de s'endormir pendant les uploads ──────────
+
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "CallSync::UploadWakeLock"
+            ).apply { acquire(10 * 60 * 1_000L) } // max 10 min par acquisition
+        } catch (_: Exception) {}
+    }
+
+    // ── FileObserver — nouveaux fichiers en temps réel ────────────────────────
 
     private fun startMonitoring() {
         stopObservers()
         val rootPath   = repository.getMonitorFolderPath()
         val rootFolder = File(rootPath).also { it.mkdirs() }
-
         addObserver(rootFolder)
         rootFolder.listFiles()?.filter { it.isDirectory }?.forEach { sub -> addObserver(sub) }
-
-        serviceScope.launch { repository.addLog("Service", "Monitoring: $rootPath (+sub-dirs)") }
+        serviceScope.launch { repository.addLog("Service", "Surveillance: $rootPath (+sous-dossiers)") }
     }
 
     private fun addObserver(dir: File) {
@@ -128,13 +160,13 @@ class CallUploadService : Service() {
     private suspend fun handleNewFile(file: File) {
         if (!file.exists() || !file.isFile || !repository.isAudioFile(file)) return
 
-        repository.addLog("Service", "New file: ${file.name} — waiting for write to finish…")
+        repository.addLog("Service", "Nouveau fichier détecté: ${file.name} — attente fin d'écriture…")
 
-        // Wait until file write stabilises (size unchanged for 2 consecutive checks)
+        // Attendre que le fichier soit stable (taille constante pendant 2 checks)
         var previousSize = -1L
         var stableCount  = 0
         run stabilityCheck@{
-            repeat(120) { // max 60 seconds
+            repeat(120) {
                 val currentSize = file.length()
                 if (currentSize == previousSize && currentSize > 0) {
                     stableCount++
@@ -147,34 +179,35 @@ class CallUploadService : Service() {
             }
         }
 
-        // Dedup by path + sha256
+        // Dédup par chemin
         if (repository.uploadDao.getUploadByPath(file.absolutePath) != null) return
 
         val sha256 = repository.calculateSHA256(file)
 
-        // Already uploaded (same content, different path or re-detected)
+        // Dédup par SHA256 (fichier déjà uploadé sous un autre nom)
         val existingBySha = repository.uploadDao.getUploadBySha256(sha256)
         if (existingBySha != null && existingBySha.status == "COMPLETED") {
-            repository.addLog("Service", "Skipped (already uploaded): ${file.name}")
+            repository.addLog("Service", "Ignoré (déjà uploadé): ${file.name}")
             return
         }
 
-        // Already on server (server SHA256 cache)
+        // Déjà sur le serveur (cache SHA256)
         if (repository.isOnServer(sha256)) {
             repository.uploadDao.insertUpload(
                 Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
                     size = file.length(), status = "COMPLETED",
                     uploadedAt = System.currentTimeMillis())
             )
-            repository.addLog("Service", "Skipped (already on server): ${file.name}")
+            repository.addLog("Service", "Ignoré (déjà sur serveur): ${file.name}")
             return
         }
 
+        // Nouveau fichier — ajout à l'index et upload immédiat
         repository.uploadDao.insertUpload(
             Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
                 size = file.length(), status = "PENDING")
         )
-        repository.addLog("Service", "Queued for upload: ${file.name}")
+        repository.addLog("Service", "Mis en queue: ${file.name}")
         triggerUploadQueue()
     }
 
@@ -184,33 +217,46 @@ class CallUploadService : Service() {
         if (uploadJob?.isActive == true) return
         uploadJob = serviceScope.launch {
             delay(800)
+            acquireWakeLock() // renouveler le wake lock avant upload
             val uploaded = repository.uploadPendingFiles()
-            // Poll & execute any pending delete-at-source commands
             repository.pollAndExecuteDeleteCommands()
             if (uploaded > 0) {
                 lastUploadTime.value = System.currentTimeMillis()
-                repository.addLog("Service", "Uploaded $uploaded file(s)")
+                repository.addLog("Service", "$uploaded fichier(s) envoyé(s)")
                 updateNotification("✓ $uploaded fichier(s) envoyé(s)")
+            } else {
+                updateNotification("Surveillance en cours…")
             }
         }
     }
 
-    /** Retry pending/failed uploads every 5 minutes */
-    private fun startPeriodicRetry() {
-        retryJob?.cancel()
-        retryJob = serviceScope.launch {
+    // ── Watchdog — re-connexion + scan delta + retry toutes les 15 min ────────
+
+    private fun startWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = serviceScope.launch {
             while (true) {
-                delay(5 * 60 * 1_000L)
-                val pending = repository.uploadDao.getPendingUploads()
-                if (pending.isNotEmpty()) {
-                    repository.addLog("Service", "Periodic retry: ${pending.size} file(s)")
+                delay(WATCHDOG_INTERVAL_MS)
+                try {
+                    // Re-connexion silencieuse si le token est expiré
+                    repository.autoConnectIfNeeded()
+                    // Scan delta — fichiers créés depuis le dernier scan
+                    val found = repository.scanFolderIncremental()
+                    // Retry les fichiers en échec
+                    repository.retryFailedUploads()
+                    // Upload tout ce qui est en attente
                     triggerUploadQueue()
+                    if (found > 0) {
+                        repository.addLog("Watchdog", "$found nouveau(x) fichier(s) détecté(s)")
+                    }
+                } catch (e: Exception) {
+                    repository.addLog("Watchdog", "Erreur watchdog: ${e.message}", true)
                 }
             }
         }
     }
 
-    // ── AlarmManager restart (ntfy self-restart pattern) ─────────────────────
+    // ── AlarmManager restart (pattern ntfy) ───────────────────────────────────
 
     private fun scheduleAlarmRestart(delayMs: Long) {
         try {
@@ -229,7 +275,6 @@ class CallUploadService : Service() {
                 alarmManager.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
             }
         } catch (_: Exception) {
-            // Fallback: schedule a less-exact alarm
             try {
                 val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
                 val intent = Intent(this, ServiceRestartReceiver::class.java).apply { action = RESTART_ACTION }
@@ -239,7 +284,7 @@ class CallUploadService : Service() {
         }
     }
 
-    // ── WorkManager backup (every 15 min) ─────────────────────────────────────
+    // ── WorkManager backup (toutes les 15 min) ────────────────────────────────
 
     private fun scheduleWorkManagerBackup() {
         try {
@@ -254,10 +299,10 @@ class CallUploadService : Service() {
         } catch (_: Exception) {}
     }
 
-    // ── Foreground notification ───────────────────────────────────────────────
+    // ── Notification foreground ───────────────────────────────────────────────
 
     private fun startForegroundCompat() {
-        val notification = buildNotification("Surveillance en cours…")
+        val notification = buildNotification("Connexion au serveur…")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             try {
                 startForeground(NOTIFICATION_ID, notification,

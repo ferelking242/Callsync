@@ -92,30 +92,35 @@ class CallSyncRepository(private val context: Context) {
     fun isOnboardingCompleted(): Boolean = prefs.getBoolean("onboarding_completed", false)
     fun setOnboardingCompleted(b: Boolean) { prefs.edit().putBoolean("onboarding_completed", b).apply() }
 
+    // ── Scan timestamp — index incrémentiel ────────────────────────────────────
+
+    /** Timestamp du dernier scan complet réussi. 0 = jamais fait. */
+    fun getLastScanTimestamp(): Long = prefs.getLong("last_scan_ts", 0L)
+    private fun setLastScanTimestamp(ts: Long) { prefs.edit().putLong("last_scan_ts", ts).apply() }
+
+    /** Réinitialise le timestamp pour forcer un scan complet au prochain démarrage. */
+    fun resetScanTimestamp() { prefs.edit().putLong("last_scan_ts", 0L).apply() }
+
     // ── Server SHA256 cache (dedup) ───────────────────────────────────────────
 
-    /** Returns true if this SHA256 is already known to be on the server. */
     fun isOnServer(sha256: String): Boolean {
         val set = prefs.getStringSet("server_sha256_cache", emptySet()) ?: emptySet()
         return set.contains(sha256)
     }
 
-    /** Fetches the full records list and caches all SHA256 hashes locally. */
     suspend fun refreshServerSha256Cache() = withContext(Dispatchers.IO) {
         try {
-            if (getAuthToken().isEmpty()) login()
             val resp = getApi().getRecords("Bearer ${getAuthToken()}")
             if (resp.isSuccessful) {
                 val sha256Set = resp.body()?.map { it.sha256 }?.toSet() ?: emptySet()
                 prefs.edit().putStringSet("server_sha256_cache", sha256Set).apply()
-                addLog("Cache", "Refreshed server SHA256 cache: ${sha256Set.size} entries")
+                addLog("Cache", "SHA256 cache: ${sha256Set.size} entrée(s)")
             }
         } catch (e: Exception) {
-            addLog("Cache", "SHA256 cache refresh failed: ${e.message}", true)
+            addLog("Cache", "Refresh cache échoué: ${e.message}", true)
         }
     }
 
-    /** Adds a SHA256 to the local server cache (called after successful upload). */
     private fun addToServerCache(sha256: String) {
         val current = prefs.getStringSet("server_sha256_cache", emptySet())?.toMutableSet() ?: mutableSetOf()
         current.add(sha256)
@@ -157,16 +162,31 @@ class CallSyncRepository(private val context: Context) {
             if (response.isSuccessful) {
                 val token = response.body()?.token ?: ""
                 setAuthToken(token)
-                addLog("Auth", "Login successful")
+                addLog("Auth", "Connexion réussie")
                 Pair(true, "")
             } else {
                 val err = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                addLog("Auth", "Login failed: $err", true)
+                addLog("Auth", "Connexion échouée: $err", true)
                 Pair(false, "Login failed: $err")
             }
         } catch (e: Exception) {
-            addLog("Auth", "Login exception: ${e.message}", true)
+            addLog("Auth", "Connexion exception: ${e.message}", true)
             Pair(false, e.message ?: "Unknown error")
+        }
+    }
+
+    /**
+     * Connexion automatique + refresh du cache SHA256.
+     * Appelé au démarrage du service — silencieux en cas d'échec réseau.
+     */
+    suspend fun autoConnectIfNeeded() = withContext(Dispatchers.IO) {
+        try {
+            val (ok, _) = login()
+            if (ok) {
+                refreshServerSha256Cache()
+            }
+        } catch (e: Exception) {
+            addLog("AutoConnect", "Auto-connexion échouée: ${e.message}", true)
         }
     }
 
@@ -174,7 +194,7 @@ class CallSyncRepository(private val context: Context) {
         try {
             val response = getApi().checkHealth()
             if (response.isSuccessful) {
-                addLog("Auth", "Server reachable")
+                addLog("Auth", "Serveur joignable")
                 Pair(true, "")
             } else {
                 val err = response.errorBody()?.string() ?: "HTTP ${response.code()}"
@@ -185,13 +205,13 @@ class CallSyncRepository(private val context: Context) {
         }
     }
 
-    // ── Upload (parallel, dedup) ──────────────────────────────────────────────
+    // ── Upload (parallèle, dédup) ─────────────────────────────────────────────
 
     suspend fun uploadPendingFiles(): Int = withContext(Dispatchers.IO) {
         if (getAuthToken().isEmpty()) {
             val (ok, err) = login()
             if (!ok) {
-                addLog("Uploader", "Cannot upload — auth failed: $err", true)
+                addLog("Uploader", "Upload impossible — auth échouée: $err", true)
                 return@withContext 0
             }
         }
@@ -213,17 +233,16 @@ class CallSyncRepository(private val context: Context) {
     private suspend fun uploadSingle(upload: Upload): Boolean {
         val file = File(upload.path)
         if (!file.exists()) {
-            addLog("Uploader", "File missing, marking failed: ${upload.name}", true)
+            addLog("Uploader", "Fichier manquant, marqué FAILED: ${upload.name}", true)
             uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = "File not found"))
             return false
         }
         return try {
             val sha256 = calculateSHA256(file)
 
-            // Dedup: already on server?
             if (isOnServer(sha256)) {
                 uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
-                addLog("Uploader", "Skipped (already on server): ${upload.name}")
+                addLog("Uploader", "Ignoré (déjà sur serveur): ${upload.name}")
                 return true
             }
 
@@ -244,14 +263,13 @@ class CallSyncRepository(private val context: Context) {
                 response.isSuccessful -> {
                     uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
                     addToServerCache(sha256)
-                    addLog("Uploader", "Uploaded: ${upload.name}")
+                    addLog("Uploader", "Envoyé: ${upload.name}")
                     true
                 }
-                // 409 = sha256 conflict → already exists on server
                 response.code() == 409 -> {
                     uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
                     addToServerCache(sha256)
-                    addLog("Uploader", "Skipped (server conflict/duplicate): ${upload.name}")
+                    addLog("Uploader", "Ignoré (doublon serveur): ${upload.name}")
                     true
                 }
                 response.code() == 401 -> {
@@ -264,13 +282,13 @@ class CallSyncRepository(private val context: Context) {
                 else -> {
                     val errBody = response.errorBody()?.string() ?: "HTTP ${response.code()}"
                     uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = errBody))
-                    addLog("Uploader", "Upload failed (${response.code()}): ${upload.name}", true)
+                    addLog("Uploader", "Échec upload (${response.code()}): ${upload.name}", true)
                     false
                 }
             }
         } catch (e: Exception) {
             uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = e.message))
-            addLog("Uploader", "Upload exception: ${upload.name} — ${e.message}", true)
+            addLog("Uploader", "Exception upload: ${upload.name} — ${e.message}", true)
             false
         }
     }
@@ -288,37 +306,56 @@ class CallSyncRepository(private val context: Context) {
         }
     }
 
-    // ── Folder scanning — index-on-change only ─────────────────────────────────
+    // ── Index incrémentiel — chargé 1 fois, mis à jour en delta ───────────────
 
     /**
-     * Scans the monitored folder and adds only NEW files to the upload queue.
-     * Files already in the DB (by path OR sha256=COMPLETED) are skipped — no redundant work.
+     * Scan incrémentiel : la première fois, parcourt tout le dossier.
+     * Les fois suivantes, ne vérifie que les fichiers modifiés depuis le dernier scan.
+     * Le FileObserver gère les ajouts en temps réel — ce scan couvre les fichiers
+     * créés pendant que le service était arrêté (reboot, kill forcé, etc.).
+     *
+     * L'index Room (table uploads) est la source de vérité persistante :
+     * on l'édite (INSERT/UPDATE), on ne le recharge jamais en entier depuis le disque.
      */
-    suspend fun scanFolderManually(): Int = withContext(Dispatchers.IO) {
+    suspend fun scanFolderIncremental(): Int = withContext(Dispatchers.IO) {
         val folderPath = getMonitorFolderPath()
-        val folder = File(folderPath)
-        addLog("Scanner", "Scanning: $folderPath")
+        val folder     = File(folderPath)
 
         if (!folder.exists() || !folder.isDirectory) {
-            addLog("Scanner", "Folder not found: $folderPath", true)
+            addLog("Scanner", "Dossier introuvable: $folderPath", true)
             return@withContext 0
         }
 
-        val allFiles = collectAudioFiles(folder)
-        addLog("Scanner", "Found ${allFiles.size} audio file(s)")
+        val lastScanTs = getLastScanTimestamp()
+        val now        = System.currentTimeMillis()
+        val isFirstScan = lastScanTs == 0L
+
+        // Fenêtre de 5 s de marge pour éviter de rater des fichiers en cours d'écriture
+        val cutoff = if (isFirstScan) 0L else lastScanTs - 5_000L
+
+        val filesToCheck = mutableListOf<File>()
+        folder.walkTopDown().maxDepth(3).forEach { entry ->
+            if (entry.isFile && isAudioFile(entry) && entry.lastModified() >= cutoff) {
+                filesToCheck.add(entry)
+            }
+        }
+
+        if (isFirstScan) {
+            addLog("Scanner", "Premier scan: ${filesToCheck.size} fichier(s) audio trouvé(s)")
+        } else if (filesToCheck.isNotEmpty()) {
+            addLog("Scanner", "Scan delta: ${filesToCheck.size} fichier(s) à vérifier")
+        }
 
         var addedCount = 0
-        for (file in allFiles) {
-            // 1. Already indexed by path?
-            val existingByPath = uploadDao.getUploadByPath(file.absolutePath)
-            if (existingByPath != null) continue   // already in queue/completed — skip
+        for (file in filesToCheck) {
+            // Déjà dans l'index par chemin ?
+            if (uploadDao.getUploadByPath(file.absolutePath) != null) continue
 
             val sha256 = calculateSHA256(file)
 
-            // 2. Already completed by sha256 (renamed/moved file)?
+            // Déjà complété (fichier renommé / déplacé) ?
             val existingBySha = uploadDao.getUploadBySha256(sha256)
             if (existingBySha != null && existingBySha.status == "COMPLETED") {
-                // Insert as COMPLETED so path-dedup catches it next time
                 uploadDao.insertUpload(
                     Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
                         size = file.length(), status = "COMPLETED",
@@ -327,28 +364,84 @@ class CallSyncRepository(private val context: Context) {
                 continue
             }
 
-            // 3. Already on server (cached SHA256 set)?
+            // Déjà sur le serveur (cache SHA256) ?
             if (isOnServer(sha256)) {
                 uploadDao.insertUpload(
                     Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
                         size = file.length(), status = "COMPLETED",
                         uploadedAt = System.currentTimeMillis())
                 )
-                addLog("Scanner", "Skipped (on server): ${file.name}")
                 continue
             }
 
-            // 4. Truly new — queue for upload
+            // Vraiment nouveau — on l'ajoute à la queue
             val inserted = uploadDao.insertUpload(
                 Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
                     size = file.length(), status = "PENDING")
             )
             if (inserted > 0) {
                 addedCount++
-                addLog("Scanner", "Queued: ${file.name}")
+                addLog("Scanner", "Mis en queue: ${file.name}")
             }
         }
-        addLog("Scanner", "Scan done — $addedCount new file(s) queued")
+
+        setLastScanTimestamp(now)
+        if (addedCount > 0) addLog("Scanner", "Scan: $addedCount nouveau(x) fichier(s) en queue")
+        addedCount
+    }
+
+    /**
+     * Scan complet (ignores timestamp) — utilisé par le bouton manuel dans l'UI.
+     * Ne réinitialise PAS le timestamp.
+     */
+    suspend fun scanFolderManually(): Int = withContext(Dispatchers.IO) {
+        val folderPath = getMonitorFolderPath()
+        val folder = File(folderPath)
+        addLog("Scanner", "Scan manuel: $folderPath")
+
+        if (!folder.exists() || !folder.isDirectory) {
+            addLog("Scanner", "Dossier introuvable: $folderPath", true)
+            return@withContext 0
+        }
+
+        val allFiles = collectAudioFiles(folder)
+        addLog("Scanner", "${allFiles.size} fichier(s) audio trouvé(s)")
+
+        var addedCount = 0
+        for (file in allFiles) {
+            if (uploadDao.getUploadByPath(file.absolutePath) != null) continue
+            val sha256 = calculateSHA256(file)
+
+            val existingBySha = uploadDao.getUploadBySha256(sha256)
+            if (existingBySha != null && existingBySha.status == "COMPLETED") {
+                uploadDao.insertUpload(
+                    Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
+                        size = file.length(), status = "COMPLETED",
+                        uploadedAt = existingBySha.uploadedAt)
+                )
+                continue
+            }
+
+            if (isOnServer(sha256)) {
+                uploadDao.insertUpload(
+                    Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
+                        size = file.length(), status = "COMPLETED",
+                        uploadedAt = System.currentTimeMillis())
+                )
+                addLog("Scanner", "Ignoré (serveur): ${file.name}")
+                continue
+            }
+
+            val inserted = uploadDao.insertUpload(
+                Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
+                    size = file.length(), status = "PENDING")
+            )
+            if (inserted > 0) {
+                addedCount++
+                addLog("Scanner", "Mis en queue: ${file.name}")
+            }
+        }
+        addLog("Scanner", "Scan manuel terminé — $addedCount nouveau(x)")
         addedCount
     }
 
@@ -381,27 +474,16 @@ class CallSyncRepository(private val context: Context) {
 
     // ── Auto-detect call recordings folder ───────────────────────────────────
 
-    /**
-     * Scans all known OEM call-recorder paths and returns the one with the most
-     * audio files. Falls back to a MediaStore query if nothing is found on disk.
-     * Returns empty string if nothing is found (caller should use a sensible default).
-     */
     fun autoDetectCallRecordingsFolder(): String {
         val candidates = listOf(
-            // AOSP / stock Android
             "/storage/emulated/0/Recordings/Call",
             "/storage/emulated/0/Recordings",
-            // MIUI / Xiaomi
             "/storage/emulated/0/MIUI/sound_recorder/call_rec",
             "/storage/emulated/0/MIUI/sound_recorder",
-            // Samsung One UI
             "/storage/emulated/0/Sounds/CallRecordings",
             "/storage/emulated/0/Sounds",
-            // Huawei
             "/storage/emulated/0/Sounds/CallRecord",
-            // OnePlus / OxygenOS
             "/storage/emulated/0/Recordings/CallRecording",
-            // Generic
             "/storage/emulated/0/PhoneRecord",
             "/storage/emulated/0/CallRecordings",
             "/storage/emulated/0/CallRecording",
@@ -419,19 +501,12 @@ class CallSyncRepository(private val context: Context) {
             val dir = File(path)
             if (dir.exists() && dir.isDirectory) {
                 val count = dir.walkTopDown().maxDepth(2).count { it.isFile && isAudioFile(it) }
-                if (count > bestCount) {
-                    bestCount = count
-                    bestPath  = path
-                }
+                if (count > bestCount) { bestCount = count; bestPath = path }
             }
         }
 
-        // If nothing found on disk, try MediaStore query
-        if (bestPath.isEmpty()) {
-            bestPath = findCallRecordingsFolderViaMediaStore() ?: ""
-        }
-
-        Log.d("CallSync/AutoDetect", "Best folder: $bestPath ($bestCount files)")
+        if (bestPath.isEmpty()) bestPath = findCallRecordingsFolderViaMediaStore() ?: ""
+        Log.d("CallSync/AutoDetect", "Dossier: $bestPath ($bestCount fichiers)")
         return bestPath
     }
 
@@ -460,7 +535,7 @@ class CallSyncRepository(private val context: Context) {
 
             folders.maxByOrNull { it.value }?.key
         } catch (e: Exception) {
-            Log.w("CallSync/AutoDetect", "MediaStore query failed: ${e.message}")
+            Log.w("CallSync/AutoDetect", "MediaStore query échoué: ${e.message}")
             null
         }
     }
@@ -480,7 +555,7 @@ class CallSyncRepository(private val context: Context) {
     suspend fun resetStuckUploads() = withContext(Dispatchers.IO) {
         val stuck = uploadDao.getUploadingUploads()
         stuck.forEach { uploadDao.updateUpload(it.copy(status = "PENDING", errorMessage = null)) }
-        if (stuck.isNotEmpty()) addLog("Uploader", "Reset ${stuck.size} stuck upload(s) → PENDING")
+        if (stuck.isNotEmpty()) addLog("Uploader", "Reset ${stuck.size} upload(s) bloqué(s) → PENDING")
     }
 
     suspend fun retryFailedUploads() = withContext(Dispatchers.IO) {
@@ -489,31 +564,24 @@ class CallSyncRepository(private val context: Context) {
             uploadDao.updateUpload(it.copy(status = "PENDING", errorMessage = null,
                 retryCount = it.retryCount + 1))
         }
-        if (failed.isNotEmpty()) addLog("Uploader", "Retry ${failed.size} failed upload(s)")
+        if (failed.isNotEmpty()) addLog("Uploader", "Retry ${failed.size} upload(s) en échec")
     }
 
-    // ── Delete all local files + index ────────────────────────────────────────
+    // ── Suppression locale totale ─────────────────────────────────────────────
 
-    /**
-     * Deletes every audio file tracked in the DB from the filesystem,
-     * then clears the uploads index (Room table).
-     * Returns the number of files actually deleted.
-     */
     suspend fun deleteAllLocalFilesAndIndex(): Int = withContext(Dispatchers.IO) {
         val uploads = uploadDao.getAllUploadsList()
         var deleted = 0
         for (upload in uploads) {
             try {
                 val file = File(upload.path)
-                if (file.exists()) {
-                    file.delete()
-                    deleted++
-                }
+                if (file.exists()) { file.delete(); deleted++ }
             } catch (e: Exception) {
                 addLog("DeleteAll", "Erreur suppression ${upload.name}: ${e.message}", true)
             }
         }
         uploadDao.clearAllUploads()
+        resetScanTimestamp()  // force re-scan au prochain démarrage
         addLog("DeleteAll", "$deleted fichier(s) supprimé(s) + index vidé")
         deleted
     }
@@ -521,9 +589,9 @@ class CallSyncRepository(private val context: Context) {
     // ── Delete-at-source polling ───────────────────────────────────────────────
 
     /**
-     * Poll the server for deletion commands addressed to this device.
-     * For each command: find the local file by SHA256, delete it, acknowledge.
-     * Safe to call repeatedly — already-deleted files are handled gracefully.
+     * Interroge le serveur pour des ordres de suppression adressés à cet appareil.
+     * Pour chaque ordre : trouve le fichier local par SHA256, le supprime, accuse réception.
+     * Retire l'entrée de l'index local — pas de re-scan nécessaire.
      */
     suspend fun pollAndExecuteDeleteCommands() = withContext(Dispatchers.IO) {
         try {
@@ -538,30 +606,25 @@ class CallSyncRepository(private val context: Context) {
             val commands = response.body() ?: return@withContext
             if (commands.isEmpty()) return@withContext
 
-            addLog("DeleteCmd", "Received ${commands.size} deletion command(s)")
+            addLog("DeleteCmd", "${commands.size} ordre(s) de suppression reçu(s)")
 
             for (cmd in commands) {
                 try {
-                    // Find local upload record(s) matching this SHA256
                     val upload = uploadDao.getUploadBySha256(cmd.sha256)
                     if (upload != null) {
-                        val file = java.io.File(upload.path)
-                        if (file.exists()) {
-                            file.delete()
-                            addLog("DeleteCmd", "Deleted: ${upload.name}")
-                        }
-                        // Mark as deleted in DB so it won't be re-uploaded
+                        val file = File(upload.path)
+                        if (file.exists()) { file.delete(); addLog("DeleteCmd", "Supprimé: ${upload.name}") }
+                        // Retirer de l'index — pas de re-scan
                         uploadDao.deleteUploadById(upload.id)
                     }
-
-                    // Acknowledge regardless (command may target a file already gone)
+                    // Accuser réception même si le fichier est déjà supprimé
                     getApi().acknowledgeDeleteCommand(token, cmd.id)
                 } catch (e: Exception) {
-                    addLog("DeleteCmd", "Failed for SHA ${cmd.sha256}: ${e.message}", true)
+                    addLog("DeleteCmd", "Échec SHA ${cmd.sha256}: ${e.message}", true)
                 }
             }
         } catch (e: Exception) {
-            addLog("DeleteCmd", "Poll failed: ${e.message}", true)
+            addLog("DeleteCmd", "Polling échoué: ${e.message}", true)
         }
     }
 }
