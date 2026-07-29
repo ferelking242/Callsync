@@ -24,67 +24,101 @@ jobs:
           distribution: 'temurin'
           cache: gradle
 
-      - name: Create local.properties
-        run: echo "sdk.dir=/usr/local/lib/android/sdk" > local.properties
+      # ── Android SDK setup ─────────────────────────────────────────────────
+      - name: Install Android SDK 36 + build-tools
+        run: |
+          SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          echo "y" | "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0" \
+            --sdk_root="$ANDROID_SDK_ROOT" 2>&1 | tail -5
 
+      - name: Create local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
+      # ── Secrets plugin — needs .env (gitignored) ──────────────────────────
+      - name: Create empty .env files
+        run: touch .env && touch .env.example
+
+      # ── Signing ───────────────────────────────────────────────────────────
       - name: Decode debug keystore
         run: base64 -d debug.keystore.base64 > debug.keystore
 
-      - name: Grant execute permission for gradlew
+      - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Extract version name
+      # ── Version ───────────────────────────────────────────────────────────
+      - name: Extract version
         id: version
         run: |
-          VERSION=$(grep 'versionName' app/build.gradle.kts | python3 -c "import sys,re; m=re.search(r'\"([^\"]+)\"', sys.stdin.read()); print(m.group(1) if m else '')")
+          VERSION=$(python3 -c "
+          import re, sys
+          txt = open('app/build.gradle.kts').read()
+          m = re.search(r'versionName\s*=\s*\"([^\"]+)\"', txt)
+          print(m.group(1) if m else 'unknown')
+          ")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION"    >> "$GITHUB_OUTPUT"
-          echo "Extracted version: $VERSION"
+          echo "Building version: $VERSION"
 
+      # ── Build ─────────────────────────────────────────────────────────────
       - name: Build debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+        run: |
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --no-configuration-cache \
+            --stacktrace \
+            -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
         env:
           STORE_PASSWORD: android
           KEY_PASSWORD: android
           KEYSTORE_PATH: ${{ github.workspace }}/debug.keystore
 
-      - name: Locate & rename APK
+      # ── Locate APK ────────────────────────────────────────────────────────
+      - name: Locate APK
+        id: apk
         run: |
           APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
-          echo "Found APK: $APK"
-          cp "$APK" "callsync-${{ steps.version.outputs.version }}.apk"
-          echo "APK ready: callsync-${{ steps.version.outputs.version }}.apk"
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK found in app/build/outputs/apk/"
+            find app/build -type f | head -20
+            exit 1
+          fi
+          echo "Found: $APK  ($(du -sh "$APK" | cut -f1))"
+          DEST="callsync-${{ steps.version.outputs.version }}.apk"
+          cp "$APK" "$DEST"
+          echo "dest=$DEST" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK as workflow artifact
+      # ── Upload as workflow artifact (visible in Actions run) ──────────────
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: callsync-${{ steps.version.outputs.version }}
-          path: callsync-${{ steps.version.outputs.version }}.apk
+          path: ${{ steps.apk.outputs.dest }}
           retention-days: 30
 
-      - name: Delete existing tag and release (if any)
+      # ── GitHub Release ────────────────────────────────────────────────────
+      - name: Delete previous release/tag if exists
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release delete "${{ steps.version.outputs.tag }}" --yes 2>/dev/null || true
           git push --delete origin "${{ steps.version.outputs.tag }}" 2>/dev/null || true
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create GitHub Release with APK
         run: |
           gh release create "${{ steps.version.outputs.tag }}" \
-            "callsync-${{ steps.version.outputs.version }}.apk" \
+            "${{ steps.apk.outputs.dest }}" \
             --title "CallSync ${{ steps.version.outputs.version }}" \
             --notes "## CallSync ${{ steps.version.outputs.version }}
 
           Build automatique depuis \`main\`.
 
           ### Installation
-          1. Télécharger \`callsync-${{ steps.version.outputs.version }}.apk\`
-          2. Ouvrir le fichier sur votre appareil Android
-          3. Autoriser l'installation depuis des sources inconnues si demandé
+          1. Télécharger \`${{ steps.apk.outputs.dest }}\`
+          2. Ouvrir le fichier sur Android
+          3. Autoriser l'installation depuis sources inconnues si demandé
 
-          > Les appareils ayant une version antérieure reçoivent une notification automatiquement au prochain lancement." \
+          > Les appareils déjà installés reçoivent une notification de mise à jour au prochain lancement." \
             --latest
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
