@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Device Administration policy for CallSync.
+    Being a device admin prevents most OEM battery managers from force-stopping
+    the service and blocks uninstall without explicitly revoking admin rights first.
+-->
+<device-admin>
+    <uses-policies>
+        <!-- No restrictive policies — we only need the admin role for persistence -->
+    </uses-policies>
+</device-admin>

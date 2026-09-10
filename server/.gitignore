@@ -1,0 +1,8 @@
+# Ignore SQLite database and binary files
+callsync.db
+storage/
+server_binary
+*.exe
+*.dll
+*.so
+*.dylib
