@@ -1,0 +1,1 @@
+- [Android CI environment](ci-android-environment.md) — validate Android builds through GitHub Actions when the local SDK is unavailable.
