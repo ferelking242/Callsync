@@ -17,9 +17,8 @@ disponible au téléphone pair.
   les réglages, mais il est désactivé par défaut et ne devient actif que si
   l'option correspondante est sélectionnée.
 
-Le projet Android principal est à la racine. Le client Flutter historique est
-conservé dans `legacy-client/` pour rester compatible avec les appareils qui
-l'utilisent encore.
+Le projet Android principal est à la racine. Le client Flutter est maintenu dans
+son dépôt séparé : `ferelking242/call-sync-client`.
 
 ## Limite réseau importante
 
