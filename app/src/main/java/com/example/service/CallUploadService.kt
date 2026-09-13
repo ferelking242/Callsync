@@ -47,6 +47,7 @@ class CallUploadService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val fileObservers = mutableListOf<CustomFileObserver>()
+    private val observedDirectories = mutableSetOf<String>()
     private var uploadJob:   Job? = null
     private var watchdogJob: Job? = null
 
@@ -213,13 +214,19 @@ class CallUploadService : Service() {
         stopObservers()
         val rootPath   = repository.getMonitorFolderPath()
         val rootFolder = File(rootPath).also { it.mkdirs() }
-        addObserver(rootFolder)
-        rootFolder.listFiles()?.filter { it.isDirectory }?.forEach { sub -> addObserver(sub) }
+        // Observe every existing nested directory. Call recorder apps often
+        // create Recordings/Call/<date>/<number>, so watching only the first
+        // child directory misses later CLOSE_WRITE events.
+        rootFolder.walkTopDown()
+            .filter { it.isDirectory }
+            .forEach { addObserver(it) }
         serviceScope.launch { repository.addLog("Service", "Surveillance: $rootPath (+sous-dossiers)") }
     }
 
     private fun addObserver(dir: File) {
         if (!dir.exists()) return
+        val canonicalPath = try { dir.canonicalPath } catch (_: Exception) { dir.absolutePath }
+        if (!observedDirectories.add(canonicalPath)) return
         val obs = CustomFileObserver(dir.absolutePath) { fileName ->
             serviceScope.launch {
                 val file = File(dir, fileName)
@@ -234,6 +241,7 @@ class CallUploadService : Service() {
     private fun stopObservers() {
         fileObservers.forEach { it.stopWatching() }
         fileObservers.clear()
+        observedDirectories.clear()
     }
 
     private suspend fun handleNewFile(file: File) {

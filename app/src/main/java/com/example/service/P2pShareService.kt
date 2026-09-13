@@ -20,6 +20,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
+import java.io.RandomAccessFile
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.net.InetAddress
@@ -28,6 +29,12 @@ import java.net.Socket
 import java.security.MessageDigest
 import android.util.Base64
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -42,6 +49,12 @@ class P2pShareService : Service() {
     @Volatile private var running = true
     private var server: ServerSocket? = null
     private var acceptJob: Job? = null
+    private var relayJob: Job? = null
+    private val relayHttp = OkHttpClient.Builder()
+        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
 
     companion object {
         private const val CHANNEL = "CallSyncP2P"
@@ -67,6 +80,7 @@ class P2pShareService : Service() {
                 }
             }
         }
+        startRelayLoop()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -118,6 +132,10 @@ class P2pShareService : Service() {
     }
 
     private fun sendManifest(output: OutputStream) {
+        send(output, manifestPayload())
+    }
+
+    private fun manifestPayload(): JSONObject {
         val root = File(repository.getMonitorFolderPath())
         val files = JSONArray()
         if (root.exists() && root.isDirectory) {
@@ -131,7 +149,7 @@ class P2pShareService : Service() {
                     .put("modifiedAt", file.lastModified()))
             }
         }
-        send(output, JSONObject().put("type", "manifest").put("files", files))
+        return JSONObject().put("type", "manifest").put("files", files)
     }
 
     private fun sendFile(output: OutputStream, relativePath: String, offset: Long) {
@@ -193,6 +211,103 @@ class P2pShareService : Service() {
         output.flush()
     }
 
+    // ── Internet relay ───────────────────────────────────────────────────────
+    //
+    // Direct TCP remains the fastest path. The relay is the fallback for two
+    // phones on different mobile/Wi-Fi networks: it forwards authenticated
+    // commands and short byte chunks in memory, without writing recordings to
+    // the server disk.
+
+    private fun startRelayLoop() {
+        relayJob?.cancel()
+        relayJob = scope.launch {
+            while (running) {
+                try {
+                    relayPost("/p2p/source/register", JSONObject()
+                        .put("source_id", repository.getPhoneId())
+                        .put("secret", repository.getP2pSecret())
+                        .put("name", repository.getDeviceName()))
+
+                    val response = relayGet(
+                        "/p2p/source/poll?source_id=${android.net.Uri.encode(repository.getPhoneId())}" +
+                            "&secret=${android.net.Uri.encode(repository.getP2pSecret())}"
+                    )
+                    if (response == null) {
+                        delay(5_000L)
+                        continue
+                    }
+                    if (response.optBoolean("empty")) continue
+                    val requestId = response.optString("request_id")
+                    val request = response.optJSONObject("request")
+                    if (requestId.isBlank() || request == null) continue
+                    val reply = when (request.optString("type")) {
+                        "ping" -> JSONObject().put("type", "pong")
+                        "manifest" -> manifestPayload()
+                        "download" -> relayFileChunk(request)
+                        else -> JSONObject().put("type", "error")
+                            .put("error", "Commande P2P inconnue")
+                    }
+                    relayPost("/p2p/source/respond", JSONObject()
+                        .put("source_id", repository.getPhoneId())
+                        .put("secret", repository.getP2pSecret())
+                        .put("request_id", requestId)
+                        .put("response", reply))
+                } catch (error: Exception) {
+                    if (running) delay(5_000L)
+                }
+            }
+        }
+    }
+
+    private fun relayFileChunk(request: JSONObject): JSONObject {
+        val relativePath = request.optString("path")
+        val offset = request.optLong("offset", 0L)
+        val maxBytes = request.optInt("maxBytes", 256 * 1024).coerceIn(16 * 1024, 512 * 1024)
+        val root = File(repository.getMonitorFolderPath()).canonicalFile
+        val target = File(root, relativePath).canonicalFile
+        if (!target.toPath().startsWith(root.toPath()) ||
+            !target.isFile || offset < 0 || offset > target.length()) {
+            return JSONObject().put("type", "error").put("error", "Fichier refusé")
+        }
+
+        val length = (target.length() - offset).coerceAtMost(maxBytes.toLong()).toInt()
+        val bytes = ByteArray(length)
+        RandomAccessFile(target, "r").use { file ->
+            file.seek(offset)
+            var read = 0
+            while (read < length) {
+                val count = file.read(bytes, read, length - read)
+                if (count <= 0) break
+                read += count
+            }
+            return JSONObject()
+                .put("type", "file")
+                .put("totalSize", target.length())
+                .put("offset", offset)
+                .put("sha256", sha256(target))
+                .put("eof", offset + read >= target.length())
+                .put("data", Base64.encodeToString(bytes.copyOf(read), Base64.NO_WRAP))
+        }
+    }
+
+    private suspend fun relayGet(path: String): JSONObject? = withContext(Dispatchers.IO) {
+        val url = "${repository.getServerUrl().trimEnd('/')}$path"
+        relayHttp.newCall(Request.Builder().url(url).get().build()).execute().use { response ->
+            if (!response.isSuccessful) return@withContext null
+            response.body?.string()?.let { body -> JSONObject(body) }
+        }
+    }
+
+    private suspend fun relayPost(path: String, payload: JSONObject): JSONObject? =
+        withContext(Dispatchers.IO) {
+            val url = "${repository.getServerUrl().trimEnd('/')}$path"
+            val body = payload.toString().toRequestBody("application/json".toMediaType())
+            relayHttp.newCall(Request.Builder().url(url).post(body).build()).execute().use { response ->
+                if (!response.isSuccessful) return@withContext null
+                response.body?.string()?.let { body -> JSONObject(body) }
+            }
+        }
+
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             getSystemService(NotificationManager::class.java).createNotificationChannel(
@@ -219,6 +334,7 @@ class P2pShareService : Service() {
         running = false
         try { server?.close() } catch (_: Exception) {}
         acceptJob?.cancel()
+        relayJob?.cancel()
         scope.cancel()
         scheduleRestart()
         super.onDestroy()

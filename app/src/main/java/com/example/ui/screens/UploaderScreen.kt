@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -36,9 +37,6 @@ fun UploaderScreen(
     val uploads         by viewModel.uploads.collectAsState()
     val isServiceActive by viewModel.isServiceActive.collectAsState()
     val lastUploadTime  by viewModel.lastUploadTime.collectAsState()
-    val isConnecting    by viewModel.isConnecting.collectAsState()
-    val connOk          by viewModel.isConnectionSuccessful.collectAsState()
-    val connError       by viewModel.connectionError.collectAsState()
     val isOnline        by CallUploadService.isOnline.collectAsState()
 
     val completed   = remember(uploads) { uploads.count { it.status == "COMPLETED" } }
@@ -90,12 +88,7 @@ fun UploaderScreen(
             ) {
                 ServiceStatusCard(modifier = Modifier.weight(1f), isActive = isServiceActive)
                 NetworkStatusCard(modifier = Modifier.weight(1f), isOnline = isOnline)
-                ConnectionStatusCard(
-                    modifier     = Modifier.weight(1f),
-                    isConnecting = isConnecting,
-                    connOk       = connOk,
-                    onTest       = { viewModel.testConnection() }
-                )
+                P2pStatusCard(modifier = Modifier.weight(1f), isActive = isServiceActive)
             }
         }
 
@@ -120,8 +113,9 @@ fun UploaderScreen(
                         )
                     }
                     Text(
-                        "Copiez ce code dans CallSync Client. Aucun fichier "
-                            + "n'est stocké sur un serveur.",
+                        "Copiez ce lien dans CallSync Client. Le direct est utilisé "
+                            + "quand il est possible, sinon le relais Internet transmet "
+                            + "les fichiers sans les stocker.",
                         style = MaterialTheme.typography.bodySmall
                     )
                     SelectionContainer {
@@ -131,6 +125,27 @@ fun UploaderScreen(
                             maxLines = 4,
                             overflow = TextOverflow.Ellipsis
                         )
+                    }
+                    val context = LocalContext.current
+                    OutlinedButton(
+                        onClick = {
+                            val clipboard = context.getSystemService(
+                                android.content.Context.CLIPBOARD_SERVICE
+                            ) as android.content.ClipboardManager
+                            clipboard.setPrimaryClip(
+                                android.content.ClipData.newPlainText(
+                                    "Lien CallSync", pairingCode
+                                )
+                            )
+                            android.widget.Toast.makeText(
+                                context, "Lien copié", android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Copier le lien")
                     }
                 }
             }
@@ -160,11 +175,6 @@ fun UploaderScreen(
                     }
                 }
             }
-        }
-
-        // ── Connection error ────────────────────────────────────────────────
-        if (connError.isNotEmpty()) {
-            item { UploaderErrorBanner(message = connError) }
         }
 
         // ── Upload in-progress banner ───────────────────────────────────────
@@ -376,38 +386,25 @@ private fun NetworkStatusCard(modifier: Modifier, isOnline: Boolean) {
 }
 
 @Composable
-private fun ConnectionStatusCard(
-    modifier: Modifier,
-    isConnecting: Boolean,
-    connOk: Boolean?,
-    onTest: () -> Unit
-) {
-    val (containerColor, contentColor, label) = when {
-        isConnecting    -> Triple(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.primary, "Test…")
-        connOk == true  -> Triple(MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.secondary, "Connecté")
-        connOk == false -> Triple(MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.error, "Erreur")
-        else            -> Triple(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.onSurfaceVariant, "Tester")
-    }
+private fun P2pStatusCard(modifier: Modifier, isActive: Boolean) {
+    val containerColor = if (isActive) MaterialTheme.colorScheme.secondaryContainer
+                         else MaterialTheme.colorScheme.surfaceVariant
+    val contentColor = if (isActive) MaterialTheme.colorScheme.secondary
+                       else MaterialTheme.colorScheme.onSurfaceVariant
     Card(
         modifier = modifier,
-        onClick  = onTest,
-        enabled  = !isConnecting,
         colors   = CardDefaults.cardColors(containerColor = containerColor),
         shape    = RoundedCornerShape(12.dp)
     ) {
         Row(modifier = Modifier.padding(10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (isConnecting) {
-                CircularProgressIndicator(modifier = Modifier.size(7.dp),
-                    strokeWidth = 1.5.dp, color = contentColor)
-            } else {
-                Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(contentColor))
-            }
+            Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(contentColor))
             Column {
-                Text(label, style = MaterialTheme.typography.labelLarge,
+                Text(if (isActive) "P2P actif" else "P2P arrêté",
+                    style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold, color = contentColor)
-                Text("Pair-à-pair", style = MaterialTheme.typography.labelSmall,
+                Text("Direct + Internet", style = MaterialTheme.typography.labelSmall,
                     color = contentColor.copy(alpha = 0.7f))
             }
         }

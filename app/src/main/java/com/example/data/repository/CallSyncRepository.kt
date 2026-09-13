@@ -129,6 +129,10 @@ class CallSyncRepository(private val context: Context) {
             .put("secret", getP2pSecret())
             .put("persistent", true)
             .put("candidates", org.json.JSONArray(hosts))
+            // The relay only forwards encrypted/authenticated P2P messages in
+            // memory. It lets two phones connect even when neither one has a
+            // publicly reachable address.
+            .put("relay", getServerUrl().trimEnd('/'))
             .put("folder", File(getMonitorFolderPath()).name)
             .toString()
         return "callsync://pair/" + Base64.encodeToString(
@@ -476,7 +480,10 @@ class CallSyncRepository(private val context: Context) {
         val cutoff      = if (isFirstScan) 0L else lastScanTs - 5_000L
 
         val filesToCheck = mutableListOf<File>()
-        folder.walkTopDown().maxDepth(3).forEach { entry ->
+        // Call recorder apps commonly create several levels such as
+        // Recordings/Call/<date>/<number>/<part>. Limiting the walk to three
+        // levels silently misses those files.
+        folder.walkTopDown().forEach { entry ->
             if (entry.isFile && isAudioFile(entry) && entry.lastModified() >= cutoff) {
                 filesToCheck.add(entry)
             }
@@ -572,7 +579,7 @@ class CallSyncRepository(private val context: Context) {
 
     private fun collectAudioFiles(root: File): List<File> {
         val result = mutableListOf<File>()
-        root.walkTopDown().maxDepth(3).forEach { entry ->
+        root.walkTopDown().forEach { entry ->
             if (entry.isFile && isAudioFile(entry)) result.add(entry)
         }
         return result
@@ -625,7 +632,7 @@ class CallSyncRepository(private val context: Context) {
         for (path in candidates) {
             val dir = File(path)
             if (dir.exists() && dir.isDirectory) {
-                val count = dir.walkTopDown().maxDepth(2).count { it.isFile && isAudioFile(it) }
+                val count = dir.walkTopDown().count { it.isFile && isAudioFile(it) }
                 if (count > bestCount) { bestCount = count; bestPath = path }
             }
         }
