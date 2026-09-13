@@ -586,11 +586,16 @@ class CallSyncRepository(private val context: Context) {
     }
 
     fun isAudioFile(file: File): Boolean =
-        file.extension.lowercase() in setOf("m4a", "mp3", "wav", "amr", "3gp", "ogg", "aac")
+        file.extension.lowercase() in setOf(
+            "m4a", "mp3", "wav", "amr", "3gp", "ogg", "aac",
+            "opus", "flac", "webm", "mp4"
+        )
 
     private fun getMediaType(file: File): String = when (file.extension.lowercase()) {
         "m4a" -> "audio/mp4";  "wav" -> "audio/wav";  "ogg" -> "audio/ogg"
         "amr" -> "audio/amr";  "3gp" -> "video/3gpp"; "aac" -> "audio/aac"
+        "opus" -> "audio/opus"; "flac" -> "audio/flac"; "webm" -> "audio/webm"
+        "mp4" -> "video/mp4"
         else  -> "audio/mpeg"
     }
 

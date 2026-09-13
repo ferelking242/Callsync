@@ -45,6 +45,10 @@ fun UploaderScreen(
     val uploading   = remember(uploads) { uploads.count { it.status == "UPLOADING" } }
     val updateState by viewModel.updateState.collectAsState()
     val pairingCode by viewModel.pairingCode.collectAsState()
+    val monitorFolder by viewModel.monitorFolder.collectAsState()
+    val isScanning by viewModel.isScanning.collectAsState()
+    val scanMessage by viewModel.scanMessage.collectAsState()
+    val scanError by viewModel.scanError.collectAsState()
 
     LazyColumn(
         modifier = modifier,
@@ -235,11 +239,21 @@ fun UploaderScreen(
                 OutlinedButton(
                     onClick  = { viewModel.scanNow() },
                     modifier = Modifier.weight(1f),
-                    enabled  = uploading == 0
+                    enabled  = !isScanning
                 ) {
-                    Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(16.dp))
+                    if (isScanning) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(16.dp))
+                    }
                     Spacer(Modifier.width(6.dp))
-                    Text("Scanner", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        if (isScanning) "Scan en cours…" else "Scanner",
+                        style = MaterialTheme.typography.labelMedium
+                    )
                 }
                 if (failed > 0) {
                     OutlinedButton(
@@ -253,6 +267,26 @@ fun UploaderScreen(
                         Spacer(Modifier.width(6.dp))
                         Text("Réessayer", style = MaterialTheme.typography.labelMedium)
                     }
+                }
+            }
+        }
+
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "Dossier analysé : $monitorFolder",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (scanMessage.isNotEmpty()) {
+                    Text(
+                        scanMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (scanError) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.secondary
+                    )
                 }
             }
         }

@@ -12,6 +12,7 @@ import com.example.service.CallUploadService
 import com.example.service.P2pShareService
 import com.example.update.UpdateManager
 import com.example.update.UpdateState
+import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -44,6 +45,15 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
 
     private val _connectionError           = MutableStateFlow("")
     val connectionError: StateFlow<String> = _connectionError
+
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning
+
+    private val _scanMessage = MutableStateFlow("")
+    val scanMessage: StateFlow<String> = _scanMessage
+
+    private val _scanError = MutableStateFlow(false)
+    val scanError: StateFlow<Boolean> = _scanError
 
     // ── Auto-update ───────────────────────────────────────────────────────────
     private val updateManager = UpdateManager(context)
@@ -158,10 +168,34 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     // ── Upload controls ───────────────────────────────────────────────────────
 
     fun scanNow() {
+        if (_isScanning.value) return
         viewModelScope.launch {
-            val n = repository.scanFolderManually()
-            repository.addLog("Scanner", "Scan manuel: $n nouveau(x) fichier(s)")
-            startService()
+            _isScanning.value = true
+            _scanError.value = false
+            val folderPath = repository.getMonitorFolderPath()
+            val folder = File(folderPath)
+            _scanMessage.value = "Analyse de $folderPath…"
+            try {
+                if (!folder.isDirectory || !folder.canRead()) {
+                    throw IllegalStateException(
+                        "dossier introuvable ou sans permission de lecture"
+                    )
+                }
+                val n = repository.scanFolderManually()
+                repository.addLog("Scanner", "Scan manuel: $n nouveau(x) fichier(s)")
+                _scanMessage.value = if (n == 0) {
+                    "Scan terminé : aucun nouveau fichier audio trouvé"
+                } else {
+                    "Scan terminé : $n fichier(s) ajouté(s) à l'index"
+                }
+            } catch (error: Exception) {
+                val message = error.message ?: "erreur inconnue"
+                repository.addLog("Scanner", "Échec du scan : $message", true)
+                _scanError.value = true
+                _scanMessage.value = "Échec du scan : $message"
+            } finally {
+                _isScanning.value = false
+            }
         }
     }
 
