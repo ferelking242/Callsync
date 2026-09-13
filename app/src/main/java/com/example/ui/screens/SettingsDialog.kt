@@ -81,7 +81,7 @@ fun SettingsDialog(
                 OutlinedTextField(
                     value         = url,
                     onValueChange = { url = it },
-                    label         = { Text("URL legacy (facultative)") },
+                    label         = { Text("URL du serveur") },
                     leadingIcon   = { Icon(Icons.Default.Web, null) },
                     modifier      = Modifier.fillMaxWidth().testTag("server_url_input"),
                     singleLine    = true
@@ -181,13 +181,13 @@ fun SettingsDialog(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            "Mode serveur legacy",
+                            "Envoyer vers le serveur",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            "Désactivé par défaut : le P2P reste le mode principal. " +
-                                "Activez-le uniquement pour conserver l’ancien upload.",
+                            "Activé : les fichiers détectés sont envoyés avec votre URL, " +
+                                "nom d’utilisateur et mot de passe. Le P2P reste disponible en option.",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

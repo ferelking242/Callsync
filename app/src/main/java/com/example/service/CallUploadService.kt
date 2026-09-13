@@ -93,6 +93,11 @@ class CallUploadService : Service() {
             repository.resetStuckUploads()
             val found = repository.scanFolderIncremental()
             if (found > 0) updateNotification("$found fichier(s) indexé(s)…")
+            if (repository.isLegacyServerMode()) {
+                repository.queueIndexedFilesForServer()
+                repository.autoConnectIfNeeded()
+                repository.uploadPendingFiles()
+            }
         }
 
         startMonitoring()
@@ -277,18 +282,32 @@ class CallUploadService : Service() {
 
         repository.uploadDao.insertUpload(
             Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                size = file.length(), status = "COMPLETED",
-                uploadedAt = System.currentTimeMillis())
+                size = file.length(),
+                status = if (repository.isLegacyServerMode()) "PENDING" else "COMPLETED",
+                uploadedAt = if (repository.isLegacyServerMode()) null else System.currentTimeMillis())
         )
-        repository.addLog("Service", "Indexé pour partage pair-à-pair: ${file.name}")
+        repository.addLog(
+            "Service",
+            "Indexé ${if (repository.isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${file.name}"
+        )
+        triggerUploadQueue()
     }
 
     // ── Upload queue ──────────────────────────────────────────────────────────
 
     private fun triggerUploadQueue() {
+        if (!repository.isLegacyServerMode()) {
+            updateNotification("Partage pair-à-pair actif")
+            return
+        }
         if (uploadJob?.isActive == true) return
         uploadJob = serviceScope.launch {
-            updateNotification("Partage pair-à-pair actif")
+            repository.autoConnectIfNeeded()
+            val uploaded = repository.uploadPendingFiles()
+            updateNotification(
+                if (uploaded > 0) "$uploaded fichier(s) envoyé(s) au serveur"
+                else "Surveillance active — serveur configuré"
+            )
         }
     }
 

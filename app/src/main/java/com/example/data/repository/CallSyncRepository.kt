@@ -41,6 +41,12 @@ import java.net.NetworkInterface
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 
+data class ScanSummary(
+    val totalAudioFiles: Int,
+    val newlyIndexed: Int,
+    val alreadyIndexed: Int
+)
+
 class CallSyncRepository(private val context: Context) {
 
     private val database = AppDatabase.getDatabase(context)
@@ -56,6 +62,14 @@ class CallSyncRepository(private val context: Context) {
     init {
         if (getPhoneId().isEmpty()) {
             prefs.edit().putString("phone_id", UUID.randomUUID().toString().take(8)).apply()
+        }
+        // The server upload path is the reliable default. P2P remains
+        // available as an optional sharing channel from the home screen.
+        if (!prefs.getBoolean("server_mode_migrated", false)) {
+            prefs.edit()
+                .putBoolean("legacy_server_mode", true)
+                .putBoolean("server_mode_migrated", true)
+                .apply()
         }
     }
 
@@ -96,10 +110,16 @@ class CallSyncRepository(private val context: Context) {
      * reboot, network changes, or an app update without pairing again.
      */
     fun isLegacyServerMode(): Boolean =
-        prefs.getBoolean("legacy_server_mode", false)
+        prefs.getBoolean("legacy_server_mode", true)
 
     fun setLegacyServerMode(enabled: Boolean) {
-        prefs.edit().putBoolean("legacy_server_mode", enabled).apply()
+        val wasEnabled = isLegacyServerMode()
+        prefs.edit()
+            .putBoolean("legacy_server_mode", enabled)
+            .apply()
+        if (enabled && !wasEnabled) {
+            prefs.edit().putBoolean("server_index_queue_migrated", false).apply()
+        }
     }
 
     fun getPairedPeerIds(): Set<String> =
@@ -503,20 +523,23 @@ class CallSyncRepository(private val context: Context) {
             if (existingBySha != null && existingBySha.status == "COMPLETED") {
                 uploadDao.insertUpload(
                     Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                        size = file.length(), status = "COMPLETED",
-                        uploadedAt = existingBySha.uploadedAt)
+                        size = file.length(), status = initialIndexedStatus(),
+                        uploadedAt = if (isLegacyServerMode()) null else existingBySha.uploadedAt)
                 )
                 continue
             }
 
             val inserted = uploadDao.insertUpload(
                 Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                    size = file.length(), status = "COMPLETED",
-                    uploadedAt = System.currentTimeMillis())
+                    size = file.length(), status = initialIndexedStatus(),
+                    uploadedAt = initialIndexedAt())
             )
             if (inserted > 0) {
                 addedCount++
-                addLog("Scanner", "Indexé pour partage pair-à-pair: ${file.name}")
+                addLog(
+                    "Scanner",
+                    "Indexé ${if (isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${file.name}"
+                )
             }
         }
 
@@ -526,14 +549,14 @@ class CallSyncRepository(private val context: Context) {
     }
 
     /** Scan complet (bouton manuel dans l'UI). */
-    suspend fun scanFolderManually(): Int = withContext(Dispatchers.IO) {
+    suspend fun scanFolderManually(): ScanSummary = withContext(Dispatchers.IO) {
         val folderPath = getMonitorFolderPath()
         val folder = File(folderPath)
         addLog("Scanner", "Scan manuel: $folderPath")
 
         if (!folder.exists() || !folder.isDirectory) {
             addLog("Scanner", "Dossier introuvable: $folderPath", true)
-            return@withContext 0
+            return@withContext ScanSummary(0, 0, 0)
         }
 
         // ── Purge orphan DB entries ────────────────────────────────────────────
@@ -548,32 +571,63 @@ class CallSyncRepository(private val context: Context) {
         addLog("Scanner", "${allFiles.size} fichier(s) audio trouvé(s)")
 
         var addedCount = 0
+        var alreadyIndexedCount = 0
         for (file in allFiles) {
-            if (uploadDao.getUploadByPath(file.absolutePath) != null) continue
+            if (uploadDao.getUploadByPath(file.absolutePath) != null) {
+                alreadyIndexedCount++
+                continue
+            }
             val sha256 = calculateSHA256(file)
 
             val existingBySha = uploadDao.getUploadBySha256(sha256)
             if (existingBySha != null && existingBySha.status == "COMPLETED") {
                 uploadDao.insertUpload(
                     Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                        size = file.length(), status = "COMPLETED",
-                        uploadedAt = existingBySha.uploadedAt)
+                        size = file.length(), status = initialIndexedStatus(),
+                        uploadedAt = if (isLegacyServerMode()) null else existingBySha.uploadedAt)
                 )
+                alreadyIndexedCount++
                 continue
             }
 
             val inserted = uploadDao.insertUpload(
                 Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                    size = file.length(), status = "COMPLETED",
-                    uploadedAt = System.currentTimeMillis())
+                    size = file.length(), status = initialIndexedStatus(),
+                    uploadedAt = initialIndexedAt())
             )
             if (inserted > 0) {
                 addedCount++
-                addLog("Scanner", "Indexé pour partage pair-à-pair: ${file.name}")
+                addLog(
+                    "Scanner",
+                    "Indexé ${if (isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${file.name}"
+                )
+            } else {
+                alreadyIndexedCount++
             }
         }
         addLog("Scanner", "Scan manuel terminé — $addedCount nouveau(x)")
-        addedCount
+        ScanSummary(allFiles.size, addedCount, alreadyIndexedCount)
+    }
+
+    private fun initialIndexedStatus(): String =
+        if (isLegacyServerMode()) "PENDING" else "COMPLETED"
+
+    private fun initialIndexedAt(): Long? =
+        if (isLegacyServerMode()) null else System.currentTimeMillis()
+
+    suspend fun queueIndexedFilesForServer() = withContext(Dispatchers.IO) {
+        if (prefs.getBoolean("server_index_queue_migrated", false)) return@withContext
+        val indexed = uploadDao.getAllUploadsList()
+            .filter { it.status == "COMPLETED" && File(it.path).isFile }
+        indexed.forEach {
+            uploadDao.updateUpload(
+                it.copy(status = "PENDING", uploadedAt = null, errorMessage = null)
+            )
+        }
+        if (indexed.isNotEmpty()) {
+            addLog("Uploader", "${indexed.size} fichier(s) remis en file pour le serveur")
+        }
+        prefs.edit().putBoolean("server_index_queue_migrated", true).apply()
     }
 
     private fun collectAudioFiles(

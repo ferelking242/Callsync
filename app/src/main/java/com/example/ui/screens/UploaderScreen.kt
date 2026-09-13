@@ -32,7 +32,8 @@ import java.util.*
 @Composable
 fun UploaderScreen(
     viewModel: CallSyncViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenSettings: () -> Unit = {}
 ) {
     val uploads         by viewModel.uploads.collectAsState()
     val isServiceActive by viewModel.isServiceActive.collectAsState()
@@ -45,6 +46,12 @@ fun UploaderScreen(
     val uploading   = remember(uploads) { uploads.count { it.status == "UPLOADING" } }
     val updateState by viewModel.updateState.collectAsState()
     val pairingCode by viewModel.pairingCode.collectAsState()
+    val serverUrl by viewModel.serverUrl.collectAsState()
+    val username by viewModel.username.collectAsState()
+    val isConnecting by viewModel.isConnecting.collectAsState()
+    val isConnectionSuccessful by viewModel.isConnectionSuccessful.collectAsState()
+    val connectionError by viewModel.connectionError.collectAsState()
+    val serverMode by viewModel.legacyServerMode.collectAsState()
     val monitorFolder by viewModel.monitorFolder.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
     val scanMessage by viewModel.scanMessage.collectAsState()
@@ -101,58 +108,87 @@ fun UploaderScreen(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 ),
-                shape = RoundedCornerShape(14.dp)
+                shape = RoundedCornerShape(12.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Share, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null,
+                            modifier = Modifier.size(18.dp))
                         Text(
-                            "Partage pair-à-pair",
-                            style = MaterialTheme.typography.titleSmall,
+                            "P2P optionnel",
+                            style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold
                         )
-                    }
-                    Text(
-                        "Copiez ce lien dans CallSync Client. Le direct est utilisé "
-                            + "quand il est possible, sinon le relais Internet transmet "
-                            + "les fichiers sans les stocker.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    SelectionContainer {
+                        Spacer(Modifier.weight(1f))
                         Text(
-                            pairingCode,
+                            "pour un autre client",
                             style = MaterialTheme.typography.labelSmall,
-                            maxLines = 4,
-                            overflow = TextOverflow.Ellipsis
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
                         )
                     }
-                    val context = LocalContext.current
-                    OutlinedButton(
-                        onClick = {
-                            val clipboard = context.getSystemService(
-                                android.content.Context.CLIPBOARD_SERVICE
-                            ) as android.content.ClipboardManager
-                            clipboard.setPrimaryClip(
-                                android.content.ClipData.newPlainText(
-                                    "Lien CallSync", pairingCode
-                                )
-                            )
-                            android.widget.Toast.makeText(
-                                context, "Lien copié", android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                        },
-                        modifier = Modifier.fillMaxWidth()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Copier le lien")
+                        Surface(
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.08f)
+                        ) {
+                            SelectionContainer {
+                                Text(
+                                    pairingCode,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        val context = LocalContext.current
+                        FilledTonalButton(
+                            onClick = {
+                                val clipboard = context.getSystemService(
+                                    android.content.Context.CLIPBOARD_SERVICE
+                                ) as android.content.ClipboardManager
+                                clipboard.setPrimaryClip(
+                                    android.content.ClipData.newPlainText(
+                                        "Lien CallSync", pairingCode
+                                    )
+                                )
+                                android.widget.Toast.makeText(
+                                    context, "Code copié", android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Copier", style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                 }
             }
+        }
+
+        item {
+            ServerConnectionCard(
+                url = serverUrl,
+                username = username,
+                serverMode = serverMode,
+                isConnecting = isConnecting,
+                isSuccessful = isConnectionSuccessful,
+                error = connectionError,
+                onTest = { viewModel.testConnection() },
+                onOpenSettings = onOpenSettings
+            )
         }
 
         // ── Offline banner ──────────────────────────────────────────────────
@@ -363,6 +399,113 @@ fun UploaderScreen(
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
+
+@Composable
+private fun ServerConnectionCard(
+    url: String,
+    username: String,
+    serverMode: Boolean,
+    isConnecting: Boolean,
+    isSuccessful: Boolean?,
+    error: String,
+    onTest: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
+    val statusColor = when (isSuccessful) {
+        true -> Color(0xFF2E7D32)
+        false -> MaterialTheme.colorScheme.error
+        null -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Default.Cloud,
+                    contentDescription = null,
+                    modifier = Modifier.size(19.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    "Serveur",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    when {
+                        isConnecting -> "Test en cours…"
+                        isSuccessful == true -> "Connecté"
+                        isSuccessful == false -> "Échec"
+                        serverMode -> "Actif"
+                        else -> "À configurer"
+                    },
+                    style = MaterialTheme.typography.labelMedium,
+                    color = statusColor,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Text(
+                url,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "Compte : $username",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (isSuccessful == false && error.isNotBlank()) {
+                Text(
+                    error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onTest,
+                    enabled = !isConnecting,
+                    modifier = Modifier.height(36.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                ) {
+                    if (isConnecting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(15.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(Icons.Default.Wifi, null, modifier = Modifier.size(16.dp))
+                    }
+                    Spacer(Modifier.width(5.dp))
+                    Text("Tester", style = MaterialTheme.typography.labelMedium)
+                }
+                OutlinedButton(
+                    onClick = onOpenSettings,
+                    modifier = Modifier.height(36.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                ) {
+                    Icon(Icons.Default.Settings, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("Configurer", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun ServiceStatusCard(modifier: Modifier, isActive: Boolean) {

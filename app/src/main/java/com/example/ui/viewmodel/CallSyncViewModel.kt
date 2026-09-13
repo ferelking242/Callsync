@@ -151,6 +151,14 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
 
         // Restart service with new folder
         startService()
+
+        if (legacyMode) {
+            viewModelScope.launch {
+                repository.queueIndexedFilesForServer()
+                repository.autoConnectIfNeeded()
+                repository.uploadPendingFiles()
+            }
+        }
     }
 
     fun autoDetectFolder() {
@@ -181,12 +189,21 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
                         "dossier introuvable ou sans permission de lecture"
                     )
                 }
-                val n = repository.scanFolderManually()
-                repository.addLog("Scanner", "Scan manuel: $n nouveau(x) fichier(s)")
-                _scanMessage.value = if (n == 0) {
-                    "Scan terminé : aucun nouveau fichier audio trouvé"
-                } else {
-                    "Scan terminé : $n fichier(s) ajouté(s) à l'index"
+                val result = repository.scanFolderManually()
+                repository.addLog(
+                    "Scanner",
+                    "Scan manuel: ${result.totalAudioFiles} trouvé(s), " +
+                        "${result.newlyIndexed} nouveau(x), " +
+                        "${result.alreadyIndexed} déjà indexé(s)"
+                )
+                _scanMessage.value = when {
+                    result.totalAudioFiles == 0 ->
+                        "Scan terminé : aucun fichier audio trouvé"
+                    result.newlyIndexed == 0 ->
+                        "Scan terminé : ${result.totalAudioFiles} fichier(s) audio trouvé(s), déjà indexé(s)"
+                    else ->
+                        "Scan terminé : ${result.totalAudioFiles} trouvé(s), " +
+                            "${result.newlyIndexed} ajouté(s) à la file serveur"
                 }
             } catch (error: Exception) {
                 val message = error.message ?: "erreur inconnue"

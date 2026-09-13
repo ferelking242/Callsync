@@ -46,6 +46,7 @@ fun MainScreen(viewModel: CallSyncViewModel) {
     ) { innerPadding ->
         UploaderScreen(
             viewModel = viewModel,
+            onOpenSettings = { isSettingsOpen = true },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
