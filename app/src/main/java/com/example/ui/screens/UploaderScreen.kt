@@ -412,28 +412,6 @@ private fun P2pStatusCard(modifier: Modifier, isActive: Boolean) {
 }
 
 @Composable
-private fun UploaderErrorBanner(message: String) {
-    Surface(
-        shape    = RoundedCornerShape(8.dp),
-        color    = MaterialTheme.colorScheme.errorContainer,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.Top
-        ) {
-            Icon(Icons.Default.ErrorOutline, null,
-                tint = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(18.dp).padding(top = 1.dp))
-            Text(message, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                modifier = Modifier.weight(1f))
-        }
-    }
-}
-
-@Composable
 private fun StatChip(modifier: Modifier, label: String, value: String, color: Color) {
     Card(
         modifier = modifier,
