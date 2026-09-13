@@ -42,11 +42,15 @@ jobs:
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD:   ${{ secrets.KEY_PASSWORD }}
         run: |
-          # KEYSTORE_BASE64 doit toujours être défini — keystore permanent p12
-          if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "ERREUR: le secret KEYSTORE_BASE64 est absent. Configurez-le dans les secrets du repo."
-            exit 1
+          # Always provide the debug keystore so the Gradle release fallback
+          # produces an installable APK when the private key is unavailable.
+          base64 --decode debug.keystore.base64 > debug.keystore
+
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "Private release keystore unavailable; using the signed debug keystore fallback."
+            exit 0
           fi
+
           KEYSTORE_FILE="${{ github.workspace }}/callsync-release.p12"
           echo "Decoding permanent keystore from secret..."
           echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"

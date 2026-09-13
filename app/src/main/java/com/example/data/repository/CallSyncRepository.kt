@@ -479,15 +479,14 @@ class CallSyncRepository(private val context: Context) {
         val isFirstScan = lastScanTs == 0L
         val cutoff      = if (isFirstScan) 0L else lastScanTs - 5_000L
 
-        val filesToCheck = mutableListOf<File>()
         // Call recorder apps commonly create several levels such as
         // Recordings/Call/<date>/<number>/<part>. Limiting the walk to three
-        // levels silently misses those files.
-        folder.walkTopDown().forEach { entry ->
-            if (entry.isFile && isAudioFile(entry) && entry.lastModified() >= cutoff) {
-                filesToCheck.add(entry)
-            }
-        }
+        // levels silently misses those files. On recent Android versions the
+        // raw File walk can also return no entries for shared-storage media,
+        // even though the files are visible in a file manager. collectAudioFiles
+        // merges the filesystem walk with MediaStore in that case.
+        val filesToCheck = collectAudioFiles(folder)
+            .filter { it.lastModified() >= cutoff }
 
         if (isFirstScan) {
             addLog("Scanner", "Premier scan: ${filesToCheck.size} fichier(s) audio")
@@ -577,12 +576,71 @@ class CallSyncRepository(private val context: Context) {
         addedCount
     }
 
-    private fun collectAudioFiles(root: File): List<File> {
-        val result = mutableListOf<File>()
-        root.walkTopDown().forEach { entry ->
-            if (entry.isFile && isAudioFile(entry)) result.add(entry)
+    private fun collectAudioFiles(
+        root: File,
+        includeMediaStore: Boolean = true
+    ): List<File> {
+        val result = linkedMapOf<String, File>()
+        val rootPath = runCatching { root.canonicalPath.trimEnd(File.separatorChar) }
+            .getOrDefault(root.absolutePath.trimEnd(File.separatorChar))
+
+        // Keep the direct walk first: it is cheaper and preserves the behavior
+        // for devices that grant normal shared-storage file access.
+        root.walkTopDown()
+            .onFail { failed, error ->
+                Log.w(
+                    "CallSync/Scanner",
+                    "Lecture impossible: ${failed.absolutePath}: ${error.message}"
+                )
+            }
+            .forEach { entry ->
+                if (entry.isFile && isAudioFile(entry)) {
+                    result[entry.absolutePath] = entry
+                }
+            }
+
+        // MediaStore is the reliable index for shared audio on Android 10+.
+        // Query it even when the walk found some files: a restricted subtree
+        // may otherwise hide only part of a call recorder's folder structure.
+        if (includeMediaStore) {
+            collectAudioFilesFromMediaStore(rootPath).forEach { file ->
+                result[file.absolutePath] = file
+            }
         }
-        return result
+
+        return result.values.toList()
+    }
+
+    private fun collectAudioFilesFromMediaStore(rootPath: String): List<File> {
+        return try {
+            val projection = arrayOf(MediaStore.Audio.Media.DATA)
+            val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+            } else {
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            }
+            val files = mutableListOf<File>()
+            val rootPrefix = "$rootPath${File.separator}"
+
+            context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                val dataIndex = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
+                if (dataIndex < 0) return@use
+
+                while (cursor.moveToNext()) {
+                    val path = cursor.getString(dataIndex) ?: continue
+                    val canonicalPath = runCatching { File(path).canonicalPath }.getOrNull()
+                        ?: continue
+                    if (!canonicalPath.startsWith(rootPrefix)) continue
+
+                    val file = File(canonicalPath)
+                    if (file.isFile && isAudioFile(file)) files.add(file)
+                }
+            }
+            files
+        } catch (error: Exception) {
+            Log.w("CallSync/Scanner", "MediaStore scan échoué: ${error.message}")
+            emptyList()
+        }
     }
 
     fun isAudioFile(file: File): Boolean =
@@ -635,10 +693,13 @@ class CallSyncRepository(private val context: Context) {
         var bestCount = 0
 
         for (path in candidates) {
-            val dir = File(path)
-            if (dir.exists() && dir.isDirectory) {
-                val count = dir.walkTopDown().count { it.isFile && isAudioFile(it) }
-                if (count > bestCount) { bestCount = count; bestPath = path }
+            val dir = findDirectoryCaseInsensitive(path)
+            if (dir != null) {
+                val count = collectAudioFiles(dir, includeMediaStore = false).size
+                if (count > bestCount) {
+                    bestCount = count
+                    bestPath = dir.absolutePath
+                }
             }
         }
 
@@ -647,18 +708,34 @@ class CallSyncRepository(private val context: Context) {
         return bestPath
     }
 
+    /**
+     * OEMs and recorder apps do not agree on the capitalization of folder
+     * names (for example Recordings/call vs Recordings/Call). Resolve each
+     * path component case-insensitively while keeping the actual path returned
+     * by the device.
+     */
+    private fun findDirectoryCaseInsensitive(path: String): File? {
+        val direct = File(path)
+        if (direct.isDirectory) return direct
+
+        val parentPath = direct.parent ?: return null
+        val parent = findDirectoryCaseInsensitive(parentPath) ?: return null
+        return parent.listFiles()
+            ?.firstOrNull { it.isDirectory && it.name.equals(direct.name, ignoreCase = true) }
+    }
+
     private fun findCallRecordingsFolderViaMediaStore(): String? {
         return try {
             val projection = arrayOf(MediaStore.Audio.Media.DATA)
-            val selection  = "${MediaStore.Audio.Media.DURATION} > ? AND (${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ? OR ${MediaStore.Audio.Media.DISPLAY_NAME} LIKE ?)"
-            val selArgs    = arrayOf("5000", "%call%", "%record%")
-
             val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
                 MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
             else
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
 
-            val cursor: Cursor? = context.contentResolver.query(uri, projection, selection, selArgs, null)
+            // Filter by the directory name, not the audio filename. Call
+            // recordings can have arbitrary names (including music-like names,
+            // as in Recordings/call on some phones).
+            val cursor: Cursor? = context.contentResolver.query(uri, projection, null, null, null)
             val folders = mutableMapOf<String, Int>()
 
             cursor?.use { c ->
@@ -666,7 +743,11 @@ class CallSyncRepository(private val context: Context) {
                 while (c.moveToNext()) {
                     val path = c.getString(colIdx) ?: continue
                     val dir  = File(path).parent ?: continue
-                    folders[dir] = (folders[dir] ?: 0) + 1
+                    val normalized = dir.lowercase()
+                    if (listOf("call", "record", "recorder", "phonerecord")
+                            .any { normalized.contains(it) }) {
+                        folders[dir] = (folders[dir] ?: 0) + 1
+                    }
                 }
             }
 

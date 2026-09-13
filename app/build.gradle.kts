@@ -22,19 +22,36 @@ android {
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
 
+  val releaseKeystorePath = System.getenv("KEYSTORE_PATH")
+    ?: "${rootDir}/my-upload-key.jks"
+  val releaseStorePassword = System.getenv("STORE_PASSWORD")
+  val releaseKeyPassword = System.getenv("KEY_PASSWORD")
+  val hasPrivateReleaseKey = file(releaseKeystorePath).isFile &&
+    !releaseStorePassword.isNullOrBlank() &&
+    !releaseKeyPassword.isNullOrBlank()
+
   signingConfigs {
-    create("release") {
-      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
-      storeFile = file(keystorePath)
-      storePassword = System.getenv("STORE_PASSWORD")
-      keyAlias = "upload"
-      keyPassword = System.getenv("KEY_PASSWORD")
-    }
     create("debugConfig") {
       storeFile = file("${rootDir}/debug.keystore")
       storePassword = "android"
       keyAlias = "androiddebugkey"
       keyPassword = "android"
+    }
+    create("release") {
+      if (hasPrivateReleaseKey) {
+        storeFile = file(releaseKeystorePath)
+        storePassword = releaseStorePassword
+        keyAlias = System.getenv("SIGN_KEY_ALIAS") ?: "upload"
+        keyPassword = releaseKeyPassword
+      } else {
+        // A signed fallback keeps CI/local release APKs installable when the
+        // optional private keystore is not configured. The production
+        // keystore remains preferred whenever all its inputs are present.
+        storeFile = file("${rootDir}/debug.keystore")
+        storePassword = "android"
+        keyAlias = "androiddebugkey"
+        keyPassword = "android"
+      }
     }
   }
 
