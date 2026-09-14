@@ -42,6 +42,7 @@ import android.util.Base64
 import org.json.JSONObject
 import java.net.NetworkInterface
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 data class ScanSummary(
@@ -61,6 +62,15 @@ private data class AudioSource(
 
 class CallSyncRepository(private val context: Context) {
 
+    companion object {
+        private const val DEFAULT_SERVER_URL =
+            "https://firsthand-wicked-fiber--noveb27831.replit.app/"
+        private const val LEGACY_SERVER_HOST =
+            "vapid-pleasing-drawings--koyih59365.replit.app"
+        private const val LEGACY_DEV_HOST =
+            "31b0ba36-e0f2-4a05-b3ce-726e52bd0b20-00-3qeptdt544x1d.riker.replit.dev"
+    }
+
     private val database = AppDatabase.getDatabase(context)
     val uploadDao           = database.uploadDao()
     val logDao              = database.logDao()
@@ -70,6 +80,7 @@ class CallSyncRepository(private val context: Context) {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences("callsync_prefs", Context.MODE_PRIVATE)
+    private val safFileSamples = ConcurrentHashMap<String, String>()
 
     init {
         if (getPhoneId().isEmpty()) {
@@ -88,8 +99,13 @@ class CallSyncRepository(private val context: Context) {
     // ── Settings ──────────────────────────────────────────────────────────────
 
     fun getServerUrl(): String {
-        var url = prefs.getString("server_url", "https://vapid-pleasing-drawings--koyih59365.replit.app/")
-                  ?: "https://vapid-pleasing-drawings--koyih59365.replit.app/"
+        var url = prefs.getString("server_url", DEFAULT_SERVER_URL) ?: DEFAULT_SERVER_URL
+        val isOldDefault = url.contains(LEGACY_SERVER_HOST, ignoreCase = true) ||
+            url.contains(LEGACY_DEV_HOST, ignoreCase = true)
+        if (url.isBlank() || isOldDefault) {
+            url = DEFAULT_SERVER_URL
+            prefs.edit().putString("server_url", url).apply()
+        }
         if (!url.endsWith("/")) url += "/"
         return url
     }
@@ -98,7 +114,14 @@ class CallSyncRepository(private val context: Context) {
     fun getUsername(): String = prefs.getString("username", "admin") ?: "admin"
     fun setUsername(u: String) { prefs.edit().putString("username", u).apply() }
 
-    fun getPassword(): String = prefs.getString("password", "admin123") ?: "admin123"
+    fun getPassword(): String {
+        val saved = prefs.getString("password", null)
+        if (saved.isNullOrBlank() || saved == "admin") {
+            prefs.edit().putString("password", "admin123").apply()
+            return "admin123"
+        }
+        return saved
+    }
     fun setPassword(p: String) { prefs.edit().putString("password", p).apply() }
 
     fun getAuthToken(): String = prefs.getString("auth_token", "") ?: ""
@@ -340,8 +363,11 @@ class CallSyncRepository(private val context: Context) {
     /** Connexion automatique + refresh du cache SHA256 (silencieux). */
     suspend fun autoConnectIfNeeded() = withContext(Dispatchers.IO) {
         try {
-            val (ok, _) = login()
-            if (ok) refreshServerSha256Cache()
+            if (getAuthToken().isEmpty()) {
+                val (ok, _) = login()
+                if (!ok) return@withContext
+            }
+            if (knownHashesCache.isEmpty()) refreshServerSha256Cache()
         } catch (e: Exception) {
             addLog("AutoConnect", "Auto-connexion échouée: ${e.message}", true)
         }
@@ -509,7 +535,15 @@ class CallSyncRepository(private val context: Context) {
         val cutoff      = if (isFirstScan) 0L else lastScanTs - 5_000L
 
         val filesToCheck = collectAudioSources(folderPath)
-            .filter { it.modifiedAt >= cutoff }
+            .filter {
+                // SAF has no reliable FileObserver and a fresh install may
+                // already contain old recordings. Revisit all SAF entries so
+                // they get one stable-size sample before being queued.
+                isSafFolderSelected() ||
+                    isFirstScan ||
+                    it.modifiedAt <= 0L ||
+                    it.modifiedAt >= cutoff
+            }
 
         if (isFirstScan) {
             addLog("Scanner", "Premier scan: ${filesToCheck.size} fichier(s) audio")
@@ -520,6 +554,18 @@ class CallSyncRepository(private val context: Context) {
         var addedCount = 0
         for (source in filesToCheck) {
             if (uploadDao.getUploadByPath(source.path) != null) continue
+
+            // SAF providers do not expose FileObserver events. A new recording
+            // can therefore be seen while it is still being written. Require
+            // two consecutive scans with the same non-zero size before hashing
+            // or uploading it, otherwise a partial recording could be marked
+            // completed forever.
+            if (isSafFolderSelected()) {
+                val signature = "${source.size}:${source.modifiedAt}"
+                val previous = safFileSamples.put(source.path, signature)
+                if (source.size <= 0L || previous != signature) continue
+            }
+
             val sha256 = calculateSHA256(source)
 
             val existingBySha = uploadDao.getUploadBySha256(sha256)

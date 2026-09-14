@@ -35,6 +35,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -50,6 +51,7 @@ class CallUploadService : Service() {
     private val observedDirectories = mutableSetOf<String>()
     private var uploadJob:   Job? = null
     private var watchdogJob: Job? = null
+    private var backgroundPumpJob: Job? = null
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -62,6 +64,7 @@ class CallUploadService : Service() {
         private const val HEARTBEAT_REQUEST     = 9001
         private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1_000L   // 2 min heartbeat alarm
         private const val WATCHDOG_INTERVAL_MS  = 15 * 60 * 1_000L  // 15 min watchdog coroutine
+        private const val BACKGROUND_PUMP_INTERVAL_MS = 30 * 1_000L
         // Wake lock renouvelé 2 min avant expiry (toutes les 28 min sur une durée de 30)
         private const val WAKELOCK_DURATION_MS  = 30 * 60 * 1_000L
         private const val WAKELOCK_RENEW_MS     = 28 * 60 * 1_000L
@@ -101,6 +104,7 @@ class CallUploadService : Service() {
         }
 
         startMonitoring()
+        startBackgroundPump()
         startWatchdog()
         startWakeLockRenewer()
 
@@ -121,6 +125,7 @@ class CallUploadService : Service() {
         stopObservers()
         unregisterNetworkCallback()
         watchdogJob?.cancel()
+        backgroundPumpJob?.cancel()
         serviceJob.cancel()
         wakeLock?.let { if (it.isHeld) it.release() }
         isRunning.value = false
@@ -326,7 +331,38 @@ class CallUploadService : Service() {
         }
     }
 
-    // ── Watchdog 15 min ───────────────────────────────────────────────────────
+    // ── Background upload pump ────────────────────────────────────────────────
+
+    /**
+     * SAF folders cannot be watched with FileObserver. Poll them frequently
+     * while this foreground service is alive, and retry pending uploads after
+     * transient network failures. The old 15-minute watchdog remains a safety
+     * net, not the primary upload trigger.
+     */
+    private fun startBackgroundPump() {
+        backgroundPumpJob?.cancel()
+        backgroundPumpJob = serviceScope.launch {
+            while (isActive) {
+                try {
+                    if (repository.isLegacyServerMode()) {
+                        val found = if (repository.isSafFolderSelected()) {
+                            repository.scanFolderIncremental()
+                        } else {
+                            0
+                        }
+                        if (found > 0) {
+                            updateNotification("$found fichier(s) détecté(s)…")
+                        }
+                        repository.pollAndExecuteDeleteCommands()
+                        triggerUploadQueue()
+                    }
+                } catch (e: Exception) {
+                    repository.addLog("Background", "Cycle upload échoué: ${e.message}", true)
+                }
+                delay(BACKGROUND_PUMP_INTERVAL_MS)
+            }
+        }
+    }
 
     private fun startWatchdog() {
         watchdogJob?.cancel()
