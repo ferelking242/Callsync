@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"github.com/golang-jwt/jwt/v5"
 )
 
 var jwtKey = []byte("callsync_secret_security_key_2026")
@@ -152,8 +152,10 @@ func main() {
 	{
 		auth.POST("/upload", handleUpload)
 		auth.GET("/records", handleGetRecords)
+		auth.GET("/known-hashes", handleKnownHashes)
 		auth.GET("/record/:id", handleGetRecordDetails)
 		auth.GET("/stream/:id", handleStreamRecord)
+		auth.GET("/download/:id", handleDownloadRecord)
 		auth.DELETE("/record/:id", handleDeleteRecord)
 		auth.DELETE("/purge-all", handlePurgeAll)
 
@@ -212,11 +214,11 @@ func handleLogin(c *gin.Context) {
 }
 
 func handleUpload(c *gin.Context) {
-	phoneID       := c.PostForm("phone_id")
-	deviceName    := c.PostForm("device_name")
-	androidVersion:= c.PostForm("android_version")
-	timestampStr  := c.PostForm("timestamp")
-	clientSHA256  := c.PostForm("sha256")
+	phoneID := c.PostForm("phone_id")
+	deviceName := c.PostForm("device_name")
+	androidVersion := c.PostForm("android_version")
+	timestampStr := c.PostForm("timestamp")
+	clientSHA256 := c.PostForm("sha256")
 
 	if phoneID == "" || deviceName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing phone_id or device_name"})
@@ -261,8 +263,10 @@ func handleUpload(c *gin.Context) {
 
 	// Save file
 	safeFilename := filepath.Base(fileHeader.Filename)
-	safeFilename  = strings.Map(func(r rune) rune {
-		if r == '/' || r == '\\' || r == '\000' { return '_' }
+	safeFilename = strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == '\000' {
+			return '_'
+		}
 		return r
 	}, safeFilename)
 
@@ -278,7 +282,8 @@ func handleUpload(c *gin.Context) {
 		return
 	}
 	if _, err = io.Copy(out, file); err != nil {
-		out.Close(); os.Remove(targetPath)
+		out.Close()
+		os.Remove(targetPath)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to write file"})
 		return
 	}
@@ -324,6 +329,15 @@ func handleGetRecords(c *gin.Context) {
 	c.JSON(http.StatusOK, recordings)
 }
 
+func handleKnownHashes(c *gin.Context) {
+	var hashes []string
+	if err := db.Model(&Recording{}).Pluck("sha256", &hashes).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "DB error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"sha256_list": hashes, "count": len(hashes)})
+}
+
 func handleGetRecordDetails(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
@@ -358,6 +372,38 @@ func handleStreamRecord(c *gin.Context) {
 		return
 	}
 	c.Header("Content-Type", "audio/mpeg")
+	c.Header("Accept-Ranges", "bytes")
+	c.File(rec.Path)
+}
+
+// GET /download/:id — download a complete recording for the Flutter client.
+// This is deliberately non-destructive: the viewer may retry or download the
+// same recording on more than one device.
+func handleDownloadRecord(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ID"})
+		return
+	}
+
+	var rec Recording
+	if err := db.First(&rec, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "DB error"})
+		}
+		return
+	}
+
+	if info, err := os.Stat(rec.Path); err != nil || !info.Mode().IsRegular() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File missing on disk"})
+		return
+	}
+
+	safeFilename := filepath.Base(rec.Name)
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, safeFilename))
 	c.Header("Accept-Ranges", "bytes")
 	c.File(rec.Path)
 }

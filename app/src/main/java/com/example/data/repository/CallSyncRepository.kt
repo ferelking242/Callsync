@@ -573,7 +573,20 @@ class CallSyncRepository(private val context: Context) {
         var addedCount = 0
         var alreadyIndexedCount = 0
         for (file in allFiles) {
-            if (uploadDao.getUploadByPath(file.absolutePath) != null) {
+            val existingByPath = uploadDao.getUploadByPath(file.absolutePath)
+            if (existingByPath != null) {
+                // A previous P2P scan stored the file as COMPLETED locally.
+                // Switching to server mode must put that same file back in
+                // the upload queue instead of treating it as invisible.
+                if (isLegacyServerMode() && existingByPath.status == "COMPLETED") {
+                    uploadDao.updateUpload(
+                        existingByPath.copy(
+                            status = "PENDING",
+                            uploadedAt = null,
+                            errorMessage = null
+                        )
+                    )
+                }
                 alreadyIndexedCount++
                 continue
             }

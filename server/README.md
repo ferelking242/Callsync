@@ -33,8 +33,10 @@ Le serveur Go expose les routes suivantes :
 | **POST** | `/login` | Authentification utilisateur & récupération JWT | Publique |
 | **POST** | `/upload` | Téléverser un enregistrement d'appel (multipart) | **JWT (Bearer)** |
 | **GET** | `/records` | Obtenir la liste de tous les enregistrements | **JWT (Bearer)** |
+| **GET** | `/known-hashes` | Obtenir les empreintes déjà reçues | **JWT (Bearer)** |
 | **GET** | `/record/:id` | Obtenir les détails d'un enregistrement spécifique | **JWT (Bearer)** |
 | **GET** | `/stream/:id` | Flux audio en direct (Streaming Range Requests) | **JWT (Bearer)** |
+| **GET** | `/download/:id` | Télécharger un enregistrement complet | **JWT (Bearer)** |
 | **DELETE**| `/record/:id` | Supprimer un enregistrement de la base et du disque| **JWT (Bearer)** |
 
 ---
