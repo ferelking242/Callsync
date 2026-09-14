@@ -96,7 +96,7 @@ jobs:
             ### Changements
             - Build release R8/ProGuard optimisé (minification + shrinkResources)
             - Viewer supprimé — app 100% dédiée à l'upload
-            - Auto-détection du dossier d'enregistrements
+            - Sélection du dossier d'enregistrements via l'autorisation Android SAF
             - Déduplication SHA256 (local + serveur)
             - Auto-restart ntfy-style (AlarmManager + WorkManager + START_STICKY)
             - Zéro action humaine requise

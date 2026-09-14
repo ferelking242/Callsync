@@ -1,14 +1,12 @@
 package com.example.data.repository
 
 import android.content.Context
-import android.content.ContentUris
 import android.content.SharedPreferences
-import android.database.Cursor
 import android.net.Uri
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
-import android.provider.MediaStore
+import android.provider.DocumentsContract
 import android.util.Log
 import com.example.data.api.CallSyncApi
 import com.example.data.api.LoginRequest
@@ -52,11 +50,7 @@ data class ScanSummary(
     val alreadyIndexed: Int
 )
 
-/**
- * A discovered audio item can be a normal filesystem file or a MediaStore
- * content URI. Android 10+ may expose shared audio through MediaStore while
- * hiding the same item from File.isFile() under scoped storage.
- */
+/** An audio item discovered from a filesystem folder or an SAF document URI. */
 private data class AudioSource(
     val path: String,
     val name: String,
@@ -171,7 +165,7 @@ class CallSyncRepository(private val context: Context) {
             // memory. It lets two phones connect even when neither one has a
             // publicly reachable address.
             .put("relay", getServerUrl().trimEnd('/'))
-            .put("folder", File(getMonitorFolderPath()).name)
+            .put("folder", if (isSafFolderSelected()) "SAF" else File(getMonitorFolderPath()).name)
             .toString()
         return "callsync://pair/" + Base64.encodeToString(
             payload.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
@@ -206,14 +200,12 @@ class CallSyncRepository(private val context: Context) {
     fun getAndroidVersion(): String = Build.VERSION.RELEASE
 
     fun getMonitorFolderPath(): String {
-        val default = autoDetectCallRecordingsFolder().ifEmpty {
-            "/storage/emulated/0/Recordings/Call"
-        }
-        return prefs.getString("monitor_folder", default) ?: default
+        return prefs.getString("monitor_folder", "") ?: ""
     }
     fun setMonitorFolderPath(path: String) {
         prefs.edit().putString("monitor_folder", path).apply()
     }
+    fun isSafFolderSelected(): Boolean = isTreeUri(getMonitorFolderPath())
 
     fun isOnboardingCompleted(): Boolean = prefs.getBoolean("onboarding_completed", false)
     fun setOnboardingCompleted(b: Boolean) { prefs.edit().putBoolean("onboarding_completed", b).apply() }
@@ -497,10 +489,9 @@ class CallSyncRepository(private val context: Context) {
      */
     suspend fun scanFolderIncremental(): Int = withContext(Dispatchers.IO) {
         val folderPath = getMonitorFolderPath()
-        val folder     = File(folderPath)
 
-        if (!folder.exists() || !folder.isDirectory) {
-            addLog("Scanner", "Dossier introuvable: $folderPath", true)
+        if (!isTreeUri(folderPath)) {
+            addLog("Scanner", "Sélectionnez un dossier avec Parcourir (autorisation SAF requise)", true)
             return@withContext 0
         }
 
@@ -517,13 +508,7 @@ class CallSyncRepository(private val context: Context) {
         val isFirstScan = lastScanTs == 0L
         val cutoff      = if (isFirstScan) 0L else lastScanTs - 5_000L
 
-        // Call recorder apps commonly create several levels such as
-        // Recordings/Call/<date>/<number>/<part>. Limiting the walk to three
-        // levels silently misses those files. On recent Android versions the
-        // raw File walk can also return no entries for shared-storage media,
-        // even though the files are visible in a file manager. collectAudioFiles
-        // merges the filesystem walk with MediaStore in that case.
-        val filesToCheck = collectAudioFiles(folder)
+        val filesToCheck = collectAudioSources(folderPath)
             .filter { it.modifiedAt >= cutoff }
 
         if (isFirstScan) {
@@ -569,11 +554,10 @@ class CallSyncRepository(private val context: Context) {
     /** Scan complet (bouton manuel dans l'UI). */
     suspend fun scanFolderManually(): ScanSummary = withContext(Dispatchers.IO) {
         val folderPath = getMonitorFolderPath()
-        val folder = File(folderPath)
         addLog("Scanner", "Scan manuel: $folderPath")
 
-        if (!folder.exists() || !folder.isDirectory) {
-            addLog("Scanner", "Dossier introuvable: $folderPath", true)
+        if (!isTreeUri(folderPath)) {
+            addLog("Scanner", "Sélectionnez un dossier avec Parcourir (autorisation SAF requise)", true)
             return@withContext ScanSummary(0, 0, 0)
         }
 
@@ -585,7 +569,7 @@ class CallSyncRepository(private val context: Context) {
             addLog("Scanner", "${orphans.size} entrée(s) orpheline(s) nettoyée(s)")
         }
 
-        val allFiles = collectAudioFiles(folder)
+        val allFiles = collectAudioSources(folderPath)
         addLog("Scanner", "${allFiles.size} fichier(s) audio trouvé(s)")
 
         var addedCount = 0
@@ -661,118 +645,96 @@ class CallSyncRepository(private val context: Context) {
         prefs.edit().putBoolean("server_index_queue_migrated", true).apply()
     }
 
-    private fun collectAudioFiles(
-        root: File,
-        includeMediaStore: Boolean = true
-    ): List<AudioSource> {
-        val result = linkedMapOf<String, AudioSource>()
-        val rootPath = runCatching { root.canonicalPath.trimEnd(File.separatorChar) }
-            .getOrDefault(root.absolutePath.trimEnd(File.separatorChar))
-
-        // Keep the direct walk first: it is cheaper and preserves the behavior
-        // for devices that grant normal shared-storage file access.
-        root.walkTopDown()
-            .onFail { failed, error ->
-                Log.w(
-                    "CallSync/Scanner",
-                    "Lecture impossible: ${failed.absolutePath}: ${error.message}"
-                )
-            }
-            .forEach { entry ->
-                if (entry.isFile && isAudioFile(entry)) {
-                    result[entry.absolutePath] = AudioSource(
-                        path = entry.absolutePath,
-                        name = entry.name,
-                        size = entry.length(),
-                        modifiedAt = entry.lastModified(),
-                        mimeType = getMediaType(entry.name)
-                    )
-                }
-            }
-
-        // MediaStore is the reliable index for shared audio on Android 10+.
-        // Query it even when the walk found some files: a restricted subtree
-        // may otherwise hide only part of a call recorder's folder structure.
-        if (includeMediaStore) {
-            collectAudioFilesFromMediaStore(rootPath).forEach { source ->
-                result[source.path] = source
-            }
-        }
-
-        return result.values.toList()
+    /**
+     * Scan the selected folder through the Storage Access Framework.
+     *
+     * The selected tree URI is the source of truth. Child document URIs are
+     * stored in Room and later opened with ContentResolver, so this code never
+     * needs to reconstruct /storage/emulated/0 paths.
+     */
+    private fun collectAudioSources(folderPath: String): List<AudioSource> {
+        if (!isTreeUri(folderPath)) return emptyList()
+        return collectAudioSourcesFromTree(Uri.parse(folderPath))
     }
 
-    private fun collectAudioFilesFromMediaStore(rootPath: String): List<AudioSource> {
-        return try {
-            val projection = arrayOf(
-                MediaStore.Audio.Media._ID,
-                MediaStore.Audio.Media.DATA,
-                MediaStore.Audio.Media.DISPLAY_NAME,
-                MediaStore.Audio.Media.SIZE,
-                MediaStore.Audio.Media.DATE_MODIFIED,
-                MediaStore.Audio.Media.MIME_TYPE,
-                MediaStore.Audio.Media.RELATIVE_PATH
-            )
-            val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-            } else {
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-            }
-            val sources = mutableListOf<AudioSource>()
-            val rootPrefix = "$rootPath${File.separator}"
+    private fun collectAudioSourcesFromTree(treeUri: Uri): List<AudioSource> {
+        val rootDocumentId = try {
+            DocumentsContract.getTreeDocumentId(treeUri)
+        } catch (error: Exception) {
+            Log.w("CallSync/Scanner", "URI SAF invalide: ${error.message}")
+            return emptyList()
+        }
 
-            context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-                val dataIndex = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
-                val idIndex = cursor.getColumnIndex(MediaStore.Audio.Media._ID)
-                val nameIndex = cursor.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
-                val sizeIndex = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE)
-                val modifiedIndex = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
-                val mimeIndex = cursor.getColumnIndex(MediaStore.Audio.Media.MIME_TYPE)
-                val relativePathIndex = cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
-                if (idIndex < 0 || nameIndex < 0) return@use
+        val result = mutableListOf<AudioSource>()
+        walkSafDocuments(
+            treeUri = treeUri,
+            documentId = rootDocumentId,
+            result = result,
+            visitedDocumentIds = mutableSetOf()
+        )
+        return result
+    }
+
+    private fun walkSafDocuments(
+        treeUri: Uri,
+        documentId: String,
+        result: MutableList<AudioSource>,
+        visitedDocumentIds: MutableSet<String>
+    ) {
+        if (!visitedDocumentIds.add(documentId)) return
+
+        val childrenUri = try {
+            DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, documentId)
+        } catch (error: Exception) {
+            Log.w("CallSync/Scanner", "Impossible d'ouvrir le dossier SAF: ${error.message}")
+            return
+        }
+
+        try {
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_SIZE,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_LAST_MODIFIED
+                ),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                val idIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val nameIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val sizeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                val mimeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                val modifiedIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                if (idIndex < 0 || nameIndex < 0 || mimeIndex < 0) return@use
 
                 while (cursor.moveToNext()) {
+                    val childId = cursor.getString(idIndex) ?: continue
                     val name = cursor.getString(nameIndex) ?: continue
-                    if (!isAudioExtension(name)) continue
+                    val mimeType = cursor.getString(mimeIndex)
 
-                    val physicalPath = if (dataIndex >= 0) cursor.getString(dataIndex) else null
-                    val relativePath = if (relativePathIndex >= 0) {
-                        cursor.getString(relativePathIndex)
-                    } else null
-                    val resolvedPath = resolveMediaStorePath(
-                        physicalPath = physicalPath,
-                        relativePath = relativePath,
-                        name = name
-                    ) ?: continue
-                    val canonicalPath = runCatching { File(resolvedPath).canonicalPath }
-                        .getOrDefault(resolvedPath)
-                    val insideRoot = canonicalPath == rootPath || canonicalPath.startsWith(rootPrefix)
-                    if (!insideRoot) continue
-
-                    val mediaUri = ContentUris.withAppendedId(uri, cursor.getLong(idIndex))
-                    val physicalFile = File(canonicalPath)
-                    val sourcePath = if (physicalFile.isFile && physicalFile.canRead()) {
-                        canonicalPath
-                    } else {
-                        // Keep the URI when scoped storage hides the physical
-                        // path. It can still be read with READ_MEDIA_AUDIO.
-                        mediaUri.toString()
+                    if (DocumentsContract.Document.MIME_TYPE_DIR == mimeType) {
+                        walkSafDocuments(treeUri, childId, result, visitedDocumentIds)
+                        continue
                     }
+                    if (!isAudioExtension(name) && mimeType?.startsWith("audio/") != true) continue
+
+                    val childUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
                     val size = if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
                         cursor.getLong(sizeIndex)
                     } else {
-                        physicalFile.length()
+                        -1L
                     }
                     val modifiedAt = if (modifiedIndex >= 0 && !cursor.isNull(modifiedIndex)) {
-                        cursor.getLong(modifiedIndex) * 1_000L
+                        cursor.getLong(modifiedIndex)
                     } else {
-                        physicalFile.lastModified()
+                        0L
                     }
-                    val mimeType = if (mimeIndex >= 0) cursor.getString(mimeIndex) else null
-                    if (sourcePath.startsWith("content://") && !sourceExists(sourcePath)) continue
-
-                    sources += AudioSource(
-                        path = sourcePath,
+                    result += AudioSource(
+                        path = childUri.toString(),
                         name = name,
                         size = size,
                         modifiedAt = modifiedAt,
@@ -780,16 +742,8 @@ class CallSyncRepository(private val context: Context) {
                     )
                 }
             }
-            if (sources.isNotEmpty()) {
-                Log.d(
-                    "CallSync/Scanner",
-                    "MediaStore: ${sources.size} audio(s) dans $rootPath"
-                )
-            }
-            sources
         } catch (error: Exception) {
-            Log.w("CallSync/Scanner", "MediaStore scan échoué: ${error.message}")
-            emptyList()
+            Log.w("CallSync/Scanner", "Lecture SAF impossible: ${error.message}")
         }
     }
 
@@ -831,23 +785,17 @@ class CallSyncRepository(private val context: Context) {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun resolveMediaStorePath(
-        physicalPath: String?,
-        relativePath: String?,
-        name: String
-    ): String? {
-        if (!physicalPath.isNullOrBlank()) return physicalPath
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !relativePath.isNullOrBlank()) {
-            return File(
-                android.os.Environment.getExternalStorageDirectory(),
-                relativePath.trimEnd('/') + File.separator + name
-            ).path
-        }
-        return null
-    }
-
     private fun isContentUri(path: String): Boolean =
         path.startsWith("content://", ignoreCase = true)
+
+    private fun isTreeUri(path: String): Boolean {
+        if (!isContentUri(path)) return false
+        return try {
+            DocumentsContract.isTreeUri(Uri.parse(path))
+        } catch (_: Exception) {
+            false
+        }
+    }
 
     private fun sourceExists(path: String): Boolean {
         return if (isContentUri(path)) {
@@ -867,12 +815,12 @@ class CallSyncRepository(private val context: Context) {
         return try {
             context.contentResolver.query(
                 Uri.parse(path),
-                arrayOf(MediaStore.MediaColumns.DATE_MODIFIED),
+                arrayOf(DocumentsContract.Document.COLUMN_LAST_MODIFIED),
                 null,
                 null,
                 null
             )?.use { cursor ->
-                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) * 1_000L else 0L
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else 0L
             } ?: 0L
         } catch (_: Exception) {
             0L
@@ -882,7 +830,7 @@ class CallSyncRepository(private val context: Context) {
     private fun openSource(path: String): InputStream {
         if (isContentUri(path)) {
             return context.contentResolver.openInputStream(Uri.parse(path))
-                ?: throw IllegalStateException("MediaStore source unavailable")
+                ?: throw IllegalStateException("Source SAF indisponible")
         }
         return FileInputStream(File(path))
     }
@@ -902,97 +850,6 @@ class CallSyncRepository(private val context: Context) {
                 }
             }
         }
-
-    // ── Auto-detect call recordings folder ───────────────────────────────────
-
-    fun autoDetectCallRecordingsFolder(): String {
-        val candidates = listOf(
-            "/storage/emulated/0/Recordings/Call",
-            "/storage/emulated/0/Recordings",
-            "/storage/emulated/0/MIUI/sound_recorder/call_rec",
-            "/storage/emulated/0/MIUI/sound_recorder",
-            "/storage/emulated/0/Sounds/CallRecordings",
-            "/storage/emulated/0/Sounds",
-            "/storage/emulated/0/Sounds/CallRecord",
-            "/storage/emulated/0/Recordings/CallRecording",
-            "/storage/emulated/0/PhoneRecord",
-            "/storage/emulated/0/CallRecordings",
-            "/storage/emulated/0/CallRecording",
-            "/storage/emulated/0/Download/CallRecordings",
-            "/storage/emulated/0/Voice Recorder/call",
-            "/storage/emulated/0/Record/Call",
-            "/sdcard/Recordings/Call",
-            "/sdcard/MIUI/sound_recorder/call_rec"
-        )
-
-        var bestPath  = ""
-        var bestCount = 0
-
-        for (path in candidates) {
-            val dir = findDirectoryCaseInsensitive(path)
-            if (dir != null) {
-                val count = collectAudioFiles(dir, includeMediaStore = false).size
-                if (count > bestCount) {
-                    bestCount = count
-                    bestPath = dir.absolutePath
-                }
-            }
-        }
-
-        if (bestPath.isEmpty()) bestPath = findCallRecordingsFolderViaMediaStore() ?: ""
-        Log.d("CallSync/AutoDetect", "Dossier: $bestPath ($bestCount fichiers)")
-        return bestPath
-    }
-
-    /**
-     * OEMs and recorder apps do not agree on the capitalization of folder
-     * names (for example Recordings/call vs Recordings/Call). Resolve each
-     * path component case-insensitively while keeping the actual path returned
-     * by the device.
-     */
-    private fun findDirectoryCaseInsensitive(path: String): File? {
-        val direct = File(path)
-        if (direct.isDirectory) return direct
-
-        val parentPath = direct.parent ?: return null
-        val parent = findDirectoryCaseInsensitive(parentPath) ?: return null
-        return parent.listFiles()
-            ?.firstOrNull { it.isDirectory && it.name.equals(direct.name, ignoreCase = true) }
-    }
-
-    private fun findCallRecordingsFolderViaMediaStore(): String? {
-        return try {
-            val projection = arrayOf(MediaStore.Audio.Media.DATA)
-            val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
-            else
-                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-
-            // Filter by the directory name, not the audio filename. Call
-            // recordings can have arbitrary names (including music-like names,
-            // as in Recordings/call on some phones).
-            val cursor: Cursor? = context.contentResolver.query(uri, projection, null, null, null)
-            val folders = mutableMapOf<String, Int>()
-
-            cursor?.use { c ->
-                val colIdx = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
-                while (c.moveToNext()) {
-                    val path = c.getString(colIdx) ?: continue
-                    val dir  = File(path).parent ?: continue
-                    val normalized = dir.lowercase()
-                    if (listOf("call", "record", "recorder", "phonerecord")
-                            .any { normalized.contains(it) }) {
-                        folders[dir] = (folders[dir] ?: 0) + 1
-                    }
-                }
-            }
-
-            folders.maxByOrNull { it.value }?.key
-        } catch (e: Exception) {
-            Log.w("CallSync/AutoDetect", "MediaStore query échoué: ${e.message}")
-            null
-        }
-    }
 
     // ── Logs ──────────────────────────────────────────────────────────────────
 
@@ -1044,8 +901,6 @@ class CallSyncRepository(private val context: Context) {
         resetScanTimestamp()
         // Clear in-memory cache so next scan does a fresh /known-hashes fetch
         knownHashesCache = HashSet()
-        // Recreate monitored folder so the FileObserver doesn't lose its target
-        File(getMonitorFolderPath()).mkdirs()
         addLog("DeleteAll", "$deleted fichier(s) supprimé(s) + index vidé")
         deleted
     }

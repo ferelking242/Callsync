@@ -1,2 +1,2 @@
+- [Android audio scanning](android-audio-scan.md) — use persisted SAF tree URIs and DocumentsContract recursion; do not reconstruct physical shared-storage paths.
 - [Android CI environment](ci-android-environment.md) — validate Android builds through GitHub Actions when the local SDK is unavailable.
-- [Shared audio scanning](android-audio-scan.md) — combine filesystem traversal with MediaStore because Android can hide shared audio from File.walkTopDown().

@@ -12,7 +12,6 @@ import com.example.service.CallUploadService
 import com.example.service.P2pShareService
 import com.example.update.UpdateManager
 import com.example.update.UpdateState
-import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -161,18 +160,6 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
         }
     }
 
-    fun autoDetectFolder() {
-        viewModelScope.launch {
-            val detected = repository.autoDetectCallRecordingsFolder()
-            if (detected.isNotEmpty()) {
-                repository.setMonitorFolderPath(detected)
-                monitorFolder.value = detected
-                repository.addLog("Settings", "Auto-détection: $detected")
-                startService()
-            }
-        }
-    }
-
     // ── Upload controls ───────────────────────────────────────────────────────
 
     fun scanNow() {
@@ -181,14 +168,12 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
             _isScanning.value = true
             _scanError.value = false
             val folderPath = repository.getMonitorFolderPath()
-            val folder = File(folderPath)
-            _scanMessage.value = "Analyse de $folderPath…"
+            _scanMessage.value = if (folderPath.isBlank()) {
+                "Choisissez d’abord un dossier avec Parcourir…"
+            } else {
+                "Analyse du dossier sélectionné…"
+            }
             try {
-                if (!folder.isDirectory || !folder.canRead()) {
-                    throw IllegalStateException(
-                        "dossier introuvable ou sans permission de lecture"
-                    )
-                }
                 val result = repository.scanFolderManually()
                 repository.addLog(
                     "Scanner",
@@ -197,6 +182,8 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
                         "${result.alreadyIndexed} déjà indexé(s)"
                 )
                 _scanMessage.value = when {
+                    !repository.isSafFolderSelected() ->
+                        "Aucun dossier SAF sélectionné : utilisez Parcourir dans les paramètres"
                     result.totalAudioFiles == 0 ->
                         "Scan terminé : aucun fichier audio trouvé"
                     result.newlyIndexed == 0 ->

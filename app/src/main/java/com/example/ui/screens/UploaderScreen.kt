@@ -56,6 +56,11 @@ fun UploaderScreen(
     val isScanning by viewModel.isScanning.collectAsState()
     val scanMessage by viewModel.scanMessage.collectAsState()
     val scanError by viewModel.scanError.collectAsState()
+    val monitorFolderLabel = when {
+        monitorFolder.isBlank() -> "Aucun dossier sélectionné"
+        monitorFolder.startsWith("content://", ignoreCase = true) -> "Dossier SAF sélectionné"
+        else -> monitorFolder
+    }
 
     LazyColumn(
         modifier = modifier,
@@ -310,7 +315,7 @@ fun UploaderScreen(
         item {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    "Dossier analysé : $monitorFolder",
+                    "Dossier analysé : $monitorFolderLabel",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,

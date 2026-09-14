@@ -218,6 +218,21 @@ class CallUploadService : Service() {
     private fun startMonitoring() {
         stopObservers()
         val rootPath   = repository.getMonitorFolderPath()
+        if (repository.isSafFolderSelected()) {
+            serviceScope.launch {
+                repository.addLog(
+                    "Service",
+                    "Dossier SAF sélectionné — détection par scans périodiques"
+                )
+            }
+            return
+        }
+        if (rootPath.isBlank()) {
+            serviceScope.launch {
+                repository.addLog("Service", "Aucun dossier sélectionné — utilisez Parcourir", true)
+            }
+            return
+        }
         val rootFolder = File(rootPath).also { it.mkdirs() }
         // Observe every existing nested directory. Call recorder apps often
         // create Recordings/Call/<date>/<number>, so watching only the first
@@ -326,11 +341,16 @@ class CallUploadService : Service() {
                     // If the monitored folder was deleted (e.g. after a mass purge or an
                     // OEM cleanup), FileObserver silently stops receiving events.
                     // Re-create the folder and restart observers so scanning resumes.
-                    val rootFolder = File(repository.getMonitorFolderPath())
-                    if (!rootFolder.exists() || fileObservers.isEmpty()) {
-                        rootFolder.mkdirs()
-                        startMonitoring()
-                        repository.addLog("Watchdog", "FileObserver redémarré (dossier recréé: ${rootFolder.path})")
+                    if (!repository.isSafFolderSelected()) {
+                        val rootFolder = File(repository.getMonitorFolderPath())
+                        if (!rootFolder.exists() || fileObservers.isEmpty()) {
+                            rootFolder.mkdirs()
+                            startMonitoring()
+                            repository.addLog(
+                                "Watchdog",
+                                "FileObserver redémarré (dossier recréé: ${rootFolder.path})"
+                            )
+                        }
                     }
 
                     val found = repository.scanFolderIncremental()

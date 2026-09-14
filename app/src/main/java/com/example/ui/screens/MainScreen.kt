@@ -63,8 +63,7 @@ fun MainScreen(viewModel: CallSyncViewModel) {
             onDismiss     = { isSettingsOpen = false },
             onSave        = { url, user, pass, folder, legacyMode ->
                 viewModel.saveSettings(url, user, pass, folder, legacyMode)
-            },
-            onAutoDetect = { viewModel.autoDetectFolder() }
+            }
         )
     }
 }
