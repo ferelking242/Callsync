@@ -1,8 +1,10 @@
 package com.example.data.repository
 
 import android.content.Context
+import android.content.ContentUris
 import android.content.SharedPreferences
 import android.database.Cursor
+import android.net.Uri
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -24,15 +26,18 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
+import okhttp3.MediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
-import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import java.io.File
 import java.io.FileInputStream
+import java.io.InputStream
 import java.security.MessageDigest
 import java.util.UUID
 import android.util.Base64
@@ -45,6 +50,19 @@ data class ScanSummary(
     val totalAudioFiles: Int,
     val newlyIndexed: Int,
     val alreadyIndexed: Int
+)
+
+/**
+ * A discovered audio item can be a normal filesystem file or a MediaStore
+ * content URI. Android 10+ may expose shared audio through MediaStore while
+ * hiding the same item from File.isFile() under scoped storage.
+ */
+private data class AudioSource(
+    val path: String,
+    val name: String,
+    val size: Long,
+    val modifiedAt: Long,
+    val mimeType: String? = null
 )
 
 class CallSyncRepository(private val context: Context) {
@@ -394,8 +412,7 @@ class CallSyncRepository(private val context: Context) {
     }
 
     private suspend fun uploadSingle(upload: Upload): Boolean {
-        val file = File(upload.path)
-        if (!file.exists()) {
+        if (!sourceExists(upload.path)) {
             addLog("Uploader", "Fichier manquant, marqué FAILED: ${upload.name}", true)
             uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = "File not found"))
             return false
@@ -411,13 +428,14 @@ class CallSyncRepository(private val context: Context) {
             }
 
             val token        = "Bearer ${getAuthToken()}"
-            val mediaType    = getMediaType(file).toMediaTypeOrNull()
-            val fileBody     = file.asRequestBody(mediaType)
-            val filePart     = MultipartBody.Part.createFormData("file", file.name, fileBody)
+            val mediaType    = getMediaType(upload.name).toMediaTypeOrNull()
+            val fileBody     = sourceRequestBody(upload, mediaType)
+            val filePart     = MultipartBody.Part.createFormData("file", upload.name, fileBody)
             val phoneIdBody  = getPhoneId().toRequestBody("text/plain".toMediaTypeOrNull())
             val deviceBody   = getDeviceName().toRequestBody("text/plain".toMediaTypeOrNull())
             val versionBody  = getAndroidVersion().toRequestBody("text/plain".toMediaTypeOrNull())
-            val tsBody       = file.lastModified().toString().toRequestBody("text/plain".toMediaTypeOrNull())
+            val tsBody       = sourceModifiedAt(upload.path).toString()
+                .toRequestBody("text/plain".toMediaTypeOrNull())
             val sha256Body   = sha256.toRequestBody("text/plain".toMediaTypeOrNull())
 
             uploadDao.updateUpload(upload.copy(status = "UPLOADING"))
@@ -488,7 +506,7 @@ class CallSyncRepository(private val context: Context) {
 
         // ── Purge orphan DB entries (file deleted externally while PENDING/FAILED) ──
         val orphans = uploadDao.getAllUploadsList()
-            .filter { it.status in listOf("PENDING", "FAILED") && !File(it.path).exists() }
+            .filter { it.status in listOf("PENDING", "FAILED") && !sourceExists(it.path) }
         if (orphans.isNotEmpty()) {
             orphans.forEach { uploadDao.deleteUploadById(it.id) }
             addLog("Scanner", "${orphans.size} entrée(s) orpheline(s) nettoyée(s)")
@@ -506,7 +524,7 @@ class CallSyncRepository(private val context: Context) {
         // even though the files are visible in a file manager. collectAudioFiles
         // merges the filesystem walk with MediaStore in that case.
         val filesToCheck = collectAudioFiles(folder)
-            .filter { it.lastModified() >= cutoff }
+            .filter { it.modifiedAt >= cutoff }
 
         if (isFirstScan) {
             addLog("Scanner", "Premier scan: ${filesToCheck.size} fichier(s) audio")
@@ -515,30 +533,30 @@ class CallSyncRepository(private val context: Context) {
         }
 
         var addedCount = 0
-        for (file in filesToCheck) {
-            if (uploadDao.getUploadByPath(file.absolutePath) != null) continue
-            val sha256 = calculateSHA256(file)
+        for (source in filesToCheck) {
+            if (uploadDao.getUploadByPath(source.path) != null) continue
+            val sha256 = calculateSHA256(source)
 
             val existingBySha = uploadDao.getUploadBySha256(sha256)
             if (existingBySha != null && existingBySha.status == "COMPLETED") {
                 uploadDao.insertUpload(
-                    Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                        size = file.length(), status = initialIndexedStatus(),
+                    Upload(sha256 = sha256, path = source.path, name = source.name,
+                        size = source.size, status = initialIndexedStatus(),
                         uploadedAt = if (isLegacyServerMode()) null else existingBySha.uploadedAt)
                 )
                 continue
             }
 
             val inserted = uploadDao.insertUpload(
-                Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                    size = file.length(), status = initialIndexedStatus(),
+                Upload(sha256 = sha256, path = source.path, name = source.name,
+                    size = source.size, status = initialIndexedStatus(),
                     uploadedAt = initialIndexedAt())
             )
             if (inserted > 0) {
                 addedCount++
                 addLog(
                     "Scanner",
-                    "Indexé ${if (isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${file.name}"
+                    "Indexé ${if (isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${source.name}"
                 )
             }
         }
@@ -561,7 +579,7 @@ class CallSyncRepository(private val context: Context) {
 
         // ── Purge orphan DB entries ────────────────────────────────────────────
         val orphans = uploadDao.getAllUploadsList()
-            .filter { it.status in listOf("PENDING", "FAILED") && !File(it.path).exists() }
+            .filter { it.status in listOf("PENDING", "FAILED") && !sourceExists(it.path) }
         if (orphans.isNotEmpty()) {
             orphans.forEach { uploadDao.deleteUploadById(it.id) }
             addLog("Scanner", "${orphans.size} entrée(s) orpheline(s) nettoyée(s)")
@@ -572,8 +590,8 @@ class CallSyncRepository(private val context: Context) {
 
         var addedCount = 0
         var alreadyIndexedCount = 0
-        for (file in allFiles) {
-            val existingByPath = uploadDao.getUploadByPath(file.absolutePath)
+        for (source in allFiles) {
+            val existingByPath = uploadDao.getUploadByPath(source.path)
             if (existingByPath != null) {
                 // A previous P2P scan stored the file as COMPLETED locally.
                 // Switching to server mode must put that same file back in
@@ -590,13 +608,13 @@ class CallSyncRepository(private val context: Context) {
                 alreadyIndexedCount++
                 continue
             }
-            val sha256 = calculateSHA256(file)
+            val sha256 = calculateSHA256(source)
 
             val existingBySha = uploadDao.getUploadBySha256(sha256)
             if (existingBySha != null && existingBySha.status == "COMPLETED") {
                 uploadDao.insertUpload(
-                    Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                        size = file.length(), status = initialIndexedStatus(),
+                    Upload(sha256 = sha256, path = source.path, name = source.name,
+                        size = source.size, status = initialIndexedStatus(),
                         uploadedAt = if (isLegacyServerMode()) null else existingBySha.uploadedAt)
                 )
                 alreadyIndexedCount++
@@ -604,15 +622,15 @@ class CallSyncRepository(private val context: Context) {
             }
 
             val inserted = uploadDao.insertUpload(
-                Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                    size = file.length(), status = initialIndexedStatus(),
+                Upload(sha256 = sha256, path = source.path, name = source.name,
+                    size = source.size, status = initialIndexedStatus(),
                     uploadedAt = initialIndexedAt())
             )
             if (inserted > 0) {
                 addedCount++
                 addLog(
                     "Scanner",
-                    "Indexé ${if (isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${file.name}"
+                    "Indexé ${if (isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${source.name}"
                 )
             } else {
                 alreadyIndexedCount++
@@ -631,7 +649,7 @@ class CallSyncRepository(private val context: Context) {
     suspend fun queueIndexedFilesForServer() = withContext(Dispatchers.IO) {
         if (prefs.getBoolean("server_index_queue_migrated", false)) return@withContext
         val indexed = uploadDao.getAllUploadsList()
-            .filter { it.status == "COMPLETED" && File(it.path).isFile }
+            .filter { it.status == "COMPLETED" && sourceExists(it.path) }
         indexed.forEach {
             uploadDao.updateUpload(
                 it.copy(status = "PENDING", uploadedAt = null, errorMessage = null)
@@ -646,8 +664,8 @@ class CallSyncRepository(private val context: Context) {
     private fun collectAudioFiles(
         root: File,
         includeMediaStore: Boolean = true
-    ): List<File> {
-        val result = linkedMapOf<String, File>()
+    ): List<AudioSource> {
+        val result = linkedMapOf<String, AudioSource>()
         val rootPath = runCatching { root.canonicalPath.trimEnd(File.separatorChar) }
             .getOrDefault(root.absolutePath.trimEnd(File.separatorChar))
 
@@ -662,7 +680,13 @@ class CallSyncRepository(private val context: Context) {
             }
             .forEach { entry ->
                 if (entry.isFile && isAudioFile(entry)) {
-                    result[entry.absolutePath] = entry
+                    result[entry.absolutePath] = AudioSource(
+                        path = entry.absolutePath,
+                        name = entry.name,
+                        size = entry.length(),
+                        modifiedAt = entry.lastModified(),
+                        mimeType = getMediaType(entry.name)
+                    )
                 }
             }
 
@@ -670,40 +694,99 @@ class CallSyncRepository(private val context: Context) {
         // Query it even when the walk found some files: a restricted subtree
         // may otherwise hide only part of a call recorder's folder structure.
         if (includeMediaStore) {
-            collectAudioFilesFromMediaStore(rootPath).forEach { file ->
-                result[file.absolutePath] = file
+            collectAudioFilesFromMediaStore(rootPath).forEach { source ->
+                result[source.path] = source
             }
         }
 
         return result.values.toList()
     }
 
-    private fun collectAudioFilesFromMediaStore(rootPath: String): List<File> {
+    private fun collectAudioFilesFromMediaStore(rootPath: String): List<AudioSource> {
         return try {
-            val projection = arrayOf(MediaStore.Audio.Media.DATA)
+            val projection = arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.DATA,
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                MediaStore.Audio.Media.SIZE,
+                MediaStore.Audio.Media.DATE_MODIFIED,
+                MediaStore.Audio.Media.MIME_TYPE,
+                MediaStore.Audio.Media.RELATIVE_PATH
+            )
             val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
             } else {
                 MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
             }
-            val files = mutableListOf<File>()
+            val sources = mutableListOf<AudioSource>()
             val rootPrefix = "$rootPath${File.separator}"
 
             context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
                 val dataIndex = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
-                if (dataIndex < 0) return@use
+                val idIndex = cursor.getColumnIndex(MediaStore.Audio.Media._ID)
+                val nameIndex = cursor.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
+                val sizeIndex = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE)
+                val modifiedIndex = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
+                val mimeIndex = cursor.getColumnIndex(MediaStore.Audio.Media.MIME_TYPE)
+                val relativePathIndex = cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
+                if (idIndex < 0 || nameIndex < 0) return@use
 
                 while (cursor.moveToNext()) {
-                    val path = cursor.getString(dataIndex) ?: continue
-                    val canonicalPath = runCatching { File(path).canonicalPath }.getOrNull()
-                        ?: continue
-                    if (!canonicalPath.startsWith(rootPrefix)) continue
+                    val name = cursor.getString(nameIndex) ?: continue
+                    if (!isAudioExtension(name)) continue
 
-                    val file = File(canonicalPath)
-                    if (file.isFile && isAudioFile(file)) files.add(file)
+                    val physicalPath = if (dataIndex >= 0) cursor.getString(dataIndex) else null
+                    val relativePath = if (relativePathIndex >= 0) {
+                        cursor.getString(relativePathIndex)
+                    } else null
+                    val resolvedPath = resolveMediaStorePath(
+                        physicalPath = physicalPath,
+                        relativePath = relativePath,
+                        name = name
+                    ) ?: continue
+                    val canonicalPath = runCatching { File(resolvedPath).canonicalPath }
+                        .getOrDefault(resolvedPath)
+                    val insideRoot = canonicalPath == rootPath || canonicalPath.startsWith(rootPrefix)
+                    if (!insideRoot) continue
+
+                    val mediaUri = ContentUris.withAppendedId(uri, cursor.getLong(idIndex))
+                    val physicalFile = File(canonicalPath)
+                    val sourcePath = if (physicalFile.isFile && physicalFile.canRead()) {
+                        canonicalPath
+                    } else {
+                        // Keep the URI when scoped storage hides the physical
+                        // path. It can still be read with READ_MEDIA_AUDIO.
+                        mediaUri.toString()
+                    }
+                    val size = if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                        cursor.getLong(sizeIndex)
+                    } else {
+                        physicalFile.length()
+                    }
+                    val modifiedAt = if (modifiedIndex >= 0 && !cursor.isNull(modifiedIndex)) {
+                        cursor.getLong(modifiedIndex) * 1_000L
+                    } else {
+                        physicalFile.lastModified()
+                    }
+                    val mimeType = if (mimeIndex >= 0) cursor.getString(mimeIndex) else null
+                    if (sourcePath.startsWith("content://") && !sourceExists(sourcePath)) continue
+
+                    sources += AudioSource(
+                        path = sourcePath,
+                        name = name,
+                        size = size,
+                        modifiedAt = modifiedAt,
+                        mimeType = mimeType
+                    )
                 }
             }
-            files
+            if (sources.isNotEmpty()) {
+                Log.d(
+                    "CallSync/Scanner",
+                    "MediaStore: ${sources.size} audio(s) dans $rootPath"
+                )
+            }
+            sources
         } catch (error: Exception) {
             Log.w("CallSync/Scanner", "MediaStore scan échoué: ${error.message}")
             emptyList()
@@ -711,12 +794,15 @@ class CallSyncRepository(private val context: Context) {
     }
 
     fun isAudioFile(file: File): Boolean =
-        file.extension.lowercase() in setOf(
+        isAudioExtension(file.name)
+
+    private fun isAudioExtension(name: String): Boolean =
+        name.substringAfterLast('.', "").lowercase() in setOf(
             "m4a", "mp3", "wav", "amr", "3gp", "ogg", "aac",
             "opus", "flac", "webm", "mp4"
         )
 
-    private fun getMediaType(file: File): String = when (file.extension.lowercase()) {
+    private fun getMediaType(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
         "m4a" -> "audio/mp4";  "wav" -> "audio/wav";  "ogg" -> "audio/ogg"
         "amr" -> "audio/amr";  "3gp" -> "video/3gpp"; "aac" -> "audio/aac"
         "opus" -> "audio/opus"; "flac" -> "audio/flac"; "webm" -> "audio/webm"
@@ -725,14 +811,97 @@ class CallSyncRepository(private val context: Context) {
     }
 
     fun calculateSHA256(file: File): String {
+        return calculateSHA256(
+            AudioSource(
+                path = file.absolutePath,
+                name = file.name,
+                size = file.length(),
+                modifiedAt = file.lastModified()
+            )
+        )
+    }
+
+    private fun calculateSHA256(source: AudioSource): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        FileInputStream(file).use { fis ->
+        openSource(source.path).use { fis ->
             val buffer = ByteArray(8192)
             var read: Int
             while (fis.read(buffer).also { read = it } != -1) digest.update(buffer, 0, read)
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
+
+    private fun resolveMediaStorePath(
+        physicalPath: String?,
+        relativePath: String?,
+        name: String
+    ): String? {
+        if (!physicalPath.isNullOrBlank()) return physicalPath
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && !relativePath.isNullOrBlank()) {
+            return File(
+                android.os.Environment.getExternalStorageDirectory(),
+                relativePath.trimEnd('/') + File.separator + name
+            ).path
+        }
+        return null
+    }
+
+    private fun isContentUri(path: String): Boolean =
+        path.startsWith("content://", ignoreCase = true)
+
+    private fun sourceExists(path: String): Boolean {
+        return if (isContentUri(path)) {
+            try {
+                context.contentResolver.openAssetFileDescriptor(Uri.parse(path), "r")
+                    ?.use { it.length < 0L || it.length > 0L } == true
+            } catch (_: Exception) {
+                false
+            }
+        } else {
+            File(path).isFile && File(path).canRead()
+        }
+    }
+
+    private fun sourceModifiedAt(path: String): Long {
+        if (!isContentUri(path)) return File(path).lastModified()
+        return try {
+            context.contentResolver.query(
+                Uri.parse(path),
+                arrayOf(MediaStore.MediaColumns.DATE_MODIFIED),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) * 1_000L else 0L
+            } ?: 0L
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
+    private fun openSource(path: String): InputStream {
+        if (isContentUri(path)) {
+            return context.contentResolver.openInputStream(Uri.parse(path))
+                ?: throw IllegalStateException("MediaStore source unavailable")
+        }
+        return FileInputStream(File(path))
+    }
+
+    private fun sourceRequestBody(upload: Upload, mediaType: MediaType?): RequestBody =
+        object : RequestBody() {
+            override fun contentType(): MediaType? = mediaType
+            override fun contentLength(): Long = upload.size
+
+            override fun writeTo(sink: BufferedSink) {
+                openSource(upload.path).use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    var read: Int
+                    while (input.read(buffer).also { read = it } != -1) {
+                        if (read > 0) sink.write(buffer, 0, read)
+                    }
+                }
+            }
+        }
 
     // ── Auto-detect call recordings folder ───────────────────────────────────
 
@@ -859,8 +1028,14 @@ class CallSyncRepository(private val context: Context) {
         var deleted = 0
         for (upload in uploads) {
             try {
-                val file = File(upload.path)
-                if (file.exists()) { file.delete(); deleted++ }
+                if (isContentUri(upload.path)) {
+                    if (context.contentResolver.delete(Uri.parse(upload.path), null, null) > 0) {
+                        deleted++
+                    }
+                } else {
+                    val file = File(upload.path)
+                    if (file.exists()) { file.delete(); deleted++ }
+                }
             } catch (e: Exception) {
                 addLog("DeleteAll", "Erreur suppression ${upload.name}: ${e.message}", true)
             }
@@ -899,8 +1074,13 @@ class CallSyncRepository(private val context: Context) {
                 try {
                     val upload = uploadDao.getUploadBySha256(sha256)
                     if (upload != null) {
-                        val file = File(upload.path)
-                        if (file.exists()) { file.delete(); addLog("DeleteCmd", "Supprimé: ${upload.name}") }
+                        val deleted = if (isContentUri(upload.path)) {
+                            context.contentResolver.delete(Uri.parse(upload.path), null, null) > 0
+                        } else {
+                            val file = File(upload.path)
+                            file.exists() && file.delete()
+                        }
+                        if (deleted) addLog("DeleteCmd", "Supprimé: ${upload.name}")
                         uploadDao.deleteUploadById(upload.id)
                     }
                 } catch (e: Exception) {
