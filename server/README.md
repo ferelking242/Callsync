@@ -59,9 +59,7 @@ go get golang.org/x/crypto/bcrypt
 ```
 
 ### 3. Exécuter le serveur
-Le serveur s'initialise automatiquement, crée le fichier de base de données `callsync.db`, applique les migrations des tables `users`, `devices` et `recordings`, puis configure un compte administrateur par défaut :
-- **Nom d'utilisateur** : `admin`
-- **Mot de passe** : `admin123`
+Le serveur s'initialise automatiquement, crée le fichier de base de données `callsync.db` et applique les migrations des tables `users`, `devices` et `recordings`. Pour créer le premier compte administrateur, définissez `CALLSYNC_ADMIN_PASSWORD` avant le premier démarrage.
 
 ```bash
 go run main.go
@@ -76,7 +74,7 @@ L'application Android unifie à la fois le module **Uploader** et le module **Vi
 
 ### Accès Rapide & Test Local (Émulateur)
 1. Si vous exécutez le serveur Go localement sur votre ordinateur de développement et lancez l'application Android sur l'émulateur Android standard, configurez l'adresse IP du serveur sur : **`http://10.0.2.2:8080/`** (l'adresse spéciale pour accéder à l'hôte local depuis l'émulateur).
-2. Connectez-vous avec l'identifiant par défaut : `admin` / `admin123`.
+2. Connectez-vous avec le compte `admin` créé avec `CALLSYNC_ADMIN_PASSWORD`.
 
 ### Surveillance Automatique (FileObserver)
 L'application crée un **Service Foreground Permanent** (avec notification) qui écoute en direct les événements du système (`CREATE`, `MOVED_TO`, `CLOSE_WRITE`) sur le dossier configuré (par défaut : dossier `Recordings` dans l'espace de stockage externe de l'application).

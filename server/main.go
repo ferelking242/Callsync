@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -21,7 +22,26 @@ import (
 	"gorm.io/gorm"
 )
 
-var jwtKey = []byte("callsync_secret_security_key_2026")
+var jwtKey = loadJWTKey()
+
+func loadJWTKey() []byte {
+	secret := os.Getenv("CALLSYNC_JWT_SECRET")
+	if secret == "" {
+		secret = os.Getenv("SESSION_SECRET")
+	}
+	if secret != "" {
+		return []byte(secret)
+	}
+
+	// Local development can still start without configuration, but every
+	// restart invalidates tokens. Production should always provide a secret.
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		log.Fatalf("Failed to generate JWT secret: %v", err)
+	}
+	log.Println("WARNING: CALLSYNC_JWT_SECRET is not set; generated an ephemeral JWT secret")
+	return key
+}
 
 // ── Models ─────────────────────────────────────────────────────────────────────
 
@@ -76,9 +96,17 @@ func initDB() {
 	var userCount int64
 	db.Model(&User{}).Count(&userCount)
 	if userCount == 0 {
-		hash, _ := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
+		initialPassword := os.Getenv("CALLSYNC_ADMIN_PASSWORD")
+		if initialPassword == "" {
+			log.Println("No CALLSYNC_ADMIN_PASSWORD configured; no administrator account was seeded")
+			return
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(initialPassword), bcrypt.DefaultCost)
+		if err != nil {
+			log.Fatalf("Failed to hash initial admin password: %v", err)
+		}
 		db.Create(&User{Username: "admin", Password: string(hash), CreatedAt: time.Now()})
-		log.Println("Seeded default admin (admin/admin123)")
+		log.Println("Seeded initial admin account from CALLSYNC_ADMIN_PASSWORD")
 	}
 }
 
@@ -114,6 +142,9 @@ func authMiddleware() gin.HandlerFunc {
 		}
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(parts[1], claims, func(t *jwt.Token) (interface{}, error) {
+			if t.Method != jwt.SigningMethodHS256 {
+				return nil, errors.New("unexpected JWT signing method")
+			}
 			return jwtKey, nil
 		})
 		if err != nil || !token.Valid {
@@ -214,6 +245,9 @@ func handleLogin(c *gin.Context) {
 }
 
 func handleUpload(c *gin.Context) {
+	const maxUploadSize = 512 * 1024 * 1024
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadSize)
+
 	phoneID := c.PostForm("phone_id")
 	deviceName := c.PostForm("device_name")
 	androidVersion := c.PostForm("android_version")

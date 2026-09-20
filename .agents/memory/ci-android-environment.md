@@ -7,4 +7,4 @@ The authoritative Android build check for this project is the GitHub Actions pip
 
 **Why:** The project’s Gradle build requires Android SDK platform/build-tool packages that are not available in the local runtime, while the repository CI provisions them reliably.
 
-**How to apply:** Push Android changes and monitor the debug and release workflows rather than treating a local SDK-location failure as a source-code failure.
+**How to apply:** Push Android changes and monitor the debug workflow for source validation. The current release workflow can fail during `setup-android` while requesting the obsolete SDK package `tools`, before Gradle runs; treat that as workflow maintenance, not an app compile failure.

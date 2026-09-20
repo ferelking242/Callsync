@@ -1,25 +1,25 @@
 # CallSync
 
-CallSync surveille le dossier d'enregistrements du téléphone source et le rend
-disponible au téléphone pair.
+CallSync surveille automatiquement le dossier d'enregistrements du téléphone et
+envoie les nouveaux fichiers audio vers le serveur configuré.
 
-## Modes de transfert
+## Fonctionnement automatique
 
-- **P2P par défaut** : le téléphone source expose directement son dossier sur
-  le port TCP CallSync. Le code de liaison contient l'identité, les adresses
-  réseau, le port, le relais Internet et une clé d'accès persistante.
-- **Relais Internet sans stockage** : si les deux téléphones ne peuvent pas
-  ouvrir une connexion TCP directe (réseaux mobiles, box, CGNAT), les commandes
-  et les blocs audio passent par le relais sécurisé en mémoire. Le relais ne
-  crée ni fichier ni copie persistante.
-- **Reprise automatique** : le client compare le manifeste, ne télécharge que
-  les fichiers absents ou modifiés, reprend les fichiers `.part` après une
-  coupure et vérifie leur SHA-256 avant le renommage final.
-- **Pairage durable** : l'identité du pair est conservée après redémarrage,
-  changement de réseau et mise à jour. Il n'y a pas d'expiration automatique.
-- **Serveur legacy facultatif** : l'ancien upload HTTP reste disponible dans
-  les réglages, mais il est désactivé par défaut et ne devient actif que si
-  l'option correspondante est sélectionnée.
+- **Démarrage en arrière-plan** : le service démarre après le boot, le
+  déverrouillage et la mise à jour de l'application sans ouvrir l'interface.
+- **Détection continue** : les créations, déplacements et fins d'écriture sont
+  détectés. Les dossiers SAF sont rescannés périodiquement car Android ne
+  fournit pas de FileObserver fiable pour ces URI.
+- **Nouveaux fichiers uniquement** : Room et SHA-256 empêchent les doublons.
+  Une modification d'un fichier existant est détectée et envoyée comme une
+  nouvelle version.
+- **Reprise automatique** : les uploads échoués utilisent un backoff
+  progressif, les erreurs permanentes ne sont pas répétées indéfiniment et la
+  synchronisation reprend au retour du réseau.
+- **Notification discrète** : Android impose une notification pour un service
+  actif, mais le canal CallSync est silencieux, sans vibration ni badge.
+- **Transfert serveur uniquement** : le partage direct entre téléphones et le
+  pairage ont été retirés pour garder un seul flux fiable.
 
 Le projet Android principal est à la racine. Le client Flutter est maintenu dans
 son dépôt séparé : `ferelking242/call-sync-client`.
