@@ -25,16 +25,14 @@ fun SettingsDialog(
     initialUser: String,
     initialPass: String,
     initialFolder: String,
-    initialLegacyMode: Boolean = false,
     onDismiss: () -> Unit,
-    onSave: (url: String, user: String, pass: String, folder: String, legacyMode: Boolean) -> Unit
+    onSave: (url: String, user: String, pass: String, folder: String) -> Unit
 ) {
     val context = LocalContext.current
     var url    by remember { mutableStateOf(initialUrl) }
     var user   by remember { mutableStateOf(initialUser) }
     var pass   by remember { mutableStateOf(initialPass) }
     var folder by remember { mutableStateOf(initialFolder) }
-    var legacyMode by remember { mutableStateOf(initialLegacyMode) }
     var showPass by remember { mutableStateOf(false) }
 
     // SAF folder picker
@@ -154,35 +152,17 @@ fun SettingsDialog(
                 )
 
                 HorizontalDivider()
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            "Envoyer vers le serveur",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            "Activé : les fichiers détectés sont envoyés avec votre URL, " +
-                                "nom d’utilisateur et mot de passe. Le P2P reste disponible en option.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = legacyMode,
-                        onCheckedChange = { legacyMode = it }
-                    )
-                }
+                Text(
+                    "Les nouveaux fichiers audio sont envoyés automatiquement dès qu’ils sont stables.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         },
         confirmButton = {
             Button(
                 onClick = {
-                    onSave(url, user, pass, folder, legacyMode)
+                    onSave(url, user, pass, folder)
                     onDismiss()
                 },
                 modifier = Modifier.testTag("save_settings_button")

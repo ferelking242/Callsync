@@ -13,8 +13,13 @@ interface UploadDao {
     @Query("SELECT * FROM uploads ORDER BY id DESC")
     fun getAllUploads(): Flow<List<Upload>>
 
-    @Query("SELECT * FROM uploads WHERE status = 'PENDING' OR status = 'FAILED' ORDER BY id ASC")
-    suspend fun getPendingUploads(): List<Upload>
+    @Query("""
+        SELECT * FROM uploads
+        WHERE (status = 'PENDING' AND nextRetryAt <= :now)
+           OR (status = 'FAILED' AND nextRetryAt <= :now)
+        ORDER BY id ASC
+    """)
+    suspend fun getPendingUploads(now: Long): List<Upload>
 
     @Query("SELECT * FROM uploads WHERE status = 'FAILED' ORDER BY id ASC")
     suspend fun getFailedUploads(): List<Upload>
@@ -62,7 +67,7 @@ interface LogDao {
 
 @Database(
     entities = [Upload::class, LogEntry::class],
-    version  = 4,
+    version  = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

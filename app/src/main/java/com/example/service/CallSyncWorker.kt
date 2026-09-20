@@ -16,10 +16,7 @@ import com.example.data.repository.CallSyncRepository
  * WorkManager worker — deux rôles :
  *
  * 1. PÉRIODIQUE (15 min) : filet de sécurité, s'assure que le service foreground tourne.
- * 2. EXPEDITED (one-shot) : déclenché immédiatement après onTaskRemoved / onDestroy.
- *    Android 12+ : s'exécute même en battery saver grâce à getForegroundInfo().
- *    Pattern utilisé par Signal, Nextcloud, Syncthing pour reprendre en arrière-plan
- *    sans attendre le prochain cycle WorkManager.
+ * 2. EXPEDITED (one-shot) : reprise immédiate après une interruption.
  */
 class CallSyncWorker(
     appContext: Context,
@@ -56,14 +53,9 @@ class CallSyncWorker(
             if (added > 0) repository.addLog("Worker", "$added nouveau(x) fichier(s) en queue")
 
             repository.retryFailedUploads()
-            // P2P is the default and never needs a central storage server.
-            // Keep the previous upload path available as an explicit legacy
-            // mode for installations that still depend on it.
-            if (repository.isLegacyServerMode()) {
-                repository.autoConnectIfNeeded()
-                repository.uploadPendingFiles()
-                repository.pollAndExecuteDeleteCommands()
-            }
+            repository.autoConnectIfNeeded()
+            repository.uploadPendingFiles()
+            repository.pollAndExecuteDeleteCommands()
 
             // S'assurer que le service foreground est vivant
             val serviceIntent = Intent(applicationContext, CallUploadService::class.java)
@@ -72,13 +64,6 @@ class CallSyncWorker(
             } else {
                 applicationContext.startService(serviceIntent)
             }
-            val p2pIntent = Intent(applicationContext, P2pShareService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                applicationContext.startForegroundService(p2pIntent)
-            } else {
-                applicationContext.startService(p2pIntent)
-            }
-
             Result.success()
         } catch (e: Exception) {
             repository.addLog("Worker", "WorkManager job échoué: ${e.message}", true)

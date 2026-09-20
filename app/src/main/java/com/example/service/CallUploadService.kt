@@ -1,6 +1,5 @@
 package com.example.service
 
-import android.app.AlarmManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -17,7 +16,6 @@ import android.os.Build
 import android.os.FileObserver
 import android.os.IBinder
 import android.os.PowerManager
-import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -52,17 +50,16 @@ class CallUploadService : Service() {
     private var uploadJob:   Job? = null
     private var watchdogJob: Job? = null
     private var backgroundPumpJob: Job? = null
+    private var lastNotificationText: String? = null
+    private var lastNotificationAt = 0L
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     companion object {
         private const val CHANNEL_ID            = "CallSyncServiceChannel"
         private const val NOTIFICATION_ID       = 1001
-        private const val RESTART_ACTION        = "com.example.RESTART_SERVICE"
         private const val WORK_NAME_PERIODIC    = "CallSyncPeriodicWorker"
         private const val WORK_NAME_IMMEDIATE   = "CallSyncImmediateWorker"
-        private const val HEARTBEAT_REQUEST     = 9001
-        private const val HEARTBEAT_INTERVAL_MS = 2 * 60 * 1_000L   // 2 min heartbeat alarm
         private const val WATCHDOG_INTERVAL_MS  = 15 * 60 * 1_000L  // 15 min watchdog coroutine
         private const val BACKGROUND_PUMP_INTERVAL_MS = 30 * 1_000L
         // Wake lock renouvelé 2 min avant expiry (toutes les 28 min sur une durée de 30)
@@ -88,19 +85,16 @@ class CallUploadService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundCompat("Démarrage…")
-        scheduleHeartbeatAlarm()
 
         serviceScope.launch {
-            repository.addLog("Service", "Démarrage du partage pair-à-pair…")
+            repository.addLog("Service", "Démarrage de la synchronisation serveur…")
             updateNotification("Surveillance active")
             repository.resetStuckUploads()
             val found = repository.scanFolderIncremental()
             if (found > 0) updateNotification("$found fichier(s) indexé(s)…")
-            if (repository.isLegacyServerMode()) {
-                repository.queueIndexedFilesForServer()
-                repository.autoConnectIfNeeded()
-                repository.uploadPendingFiles()
-            }
+            repository.queueIndexedFilesForServer()
+            repository.autoConnectIfNeeded()
+            repository.uploadPendingFiles()
         }
 
         startMonitoring()
@@ -113,10 +107,8 @@ class CallUploadService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        // Swipe recents → redémarrage très rapide
-        scheduleRestartAlarm(requestCode = 9002, delayMs = 500L)
-        scheduleHeartbeatAlarm()
-        // Déclencher aussi le worker expedited pour reprendre rapidement
+        // The periodic WorkManager job remains the battery-friendly recovery
+        // path. Exact alarms are intentionally avoided.
         triggerExpeditedWorker()
     }
 
@@ -129,7 +121,6 @@ class CallUploadService : Service() {
         serviceJob.cancel()
         wakeLock?.let { if (it.isHeld) it.release() }
         isRunning.value = false
-        scheduleRestartAlarm(requestCode = 9003, delayMs = 500L)
         triggerExpeditedWorker()
     }
 
@@ -172,9 +163,7 @@ class CallUploadService : Service() {
                         isOnline.value = true
                         serviceScope.launch {
                             repository.addLog("Réseau", "Connexion disponible — reprise uploads")
-                            if (repository.isLegacyServerMode()) {
-                                repository.autoConnectIfNeeded()
-                            }
+                            repository.autoConnectIfNeeded()
                             updateNotification("Surveillance active")
                             triggerUploadQueue()
                         }
@@ -291,9 +280,39 @@ class CallUploadService : Service() {
             }
         }
 
-        if (repository.uploadDao.getUploadByPath(file.absolutePath) != null) return
+        val existingByPath = repository.uploadDao.getUploadByPath(file.absolutePath)
+        if (existingByPath != null &&
+            existingByPath.size == file.length() &&
+            existingByPath.modifiedAt == file.lastModified()
+        ) return
 
         val sha256 = repository.calculateSHA256(file)
+        if (existingByPath != null && existingByPath.sha256 == sha256) {
+            repository.uploadDao.updateUpload(existingByPath.copy(
+                name = file.name,
+                size = file.length(),
+                modifiedAt = file.lastModified()
+            ))
+            return
+        }
+        if (existingByPath != null) {
+            repository.uploadDao.updateUpload(
+                existingByPath.copy(
+                    sha256 = sha256,
+                    name = file.name,
+                    size = file.length(),
+                    modifiedAt = file.lastModified(),
+                    status = "PENDING",
+                    uploadedAt = null,
+                    retryCount = 0,
+                    errorMessage = null,
+                    nextRetryAt = 0L
+                )
+            )
+            repository.addLog("Service", "Fichier modifié remis en queue: ${file.name}")
+            triggerUploadQueue()
+            return
+        }
         val existingBySha = repository.uploadDao.getUploadBySha256(sha256)
         if (existingBySha != null && existingBySha.status == "COMPLETED") {
             repository.addLog("Service", "Ignoré (déjà uploadé): ${file.name}")
@@ -302,13 +321,11 @@ class CallUploadService : Service() {
 
         repository.uploadDao.insertUpload(
             Upload(sha256 = sha256, path = file.absolutePath, name = file.name,
-                size = file.length(),
-                status = if (repository.isLegacyServerMode()) "PENDING" else "COMPLETED",
-                uploadedAt = if (repository.isLegacyServerMode()) null else System.currentTimeMillis())
+                size = file.length(), modifiedAt = file.lastModified(), status = "PENDING")
         )
         repository.addLog(
             "Service",
-            "Indexé ${if (repository.isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${file.name}"
+            "Indexé pour envoi serveur: ${file.name}"
         )
         triggerUploadQueue()
     }
@@ -316,10 +333,6 @@ class CallUploadService : Service() {
     // ── Upload queue ──────────────────────────────────────────────────────────
 
     private fun triggerUploadQueue() {
-        if (!repository.isLegacyServerMode()) {
-            updateNotification("Partage pair-à-pair actif")
-            return
-        }
         if (uploadJob?.isActive == true) return
         uploadJob = serviceScope.launch {
             repository.autoConnectIfNeeded()
@@ -344,18 +357,16 @@ class CallUploadService : Service() {
         backgroundPumpJob = serviceScope.launch {
             while (isActive) {
                 try {
-                    if (repository.isLegacyServerMode()) {
-                        val found = if (repository.isSafFolderSelected()) {
-                            repository.scanFolderIncremental()
-                        } else {
-                            0
-                        }
-                        if (found > 0) {
-                            updateNotification("$found fichier(s) détecté(s)…")
-                        }
-                        repository.pollAndExecuteDeleteCommands()
-                        triggerUploadQueue()
+                    val found = if (repository.isSafFolderSelected()) {
+                        repository.scanFolderIncremental()
+                    } else {
+                        0
                     }
+                    if (found > 0) {
+                        updateNotification("$found fichier(s) détecté(s)…")
+                    }
+                    repository.pollAndExecuteDeleteCommands()
+                    triggerUploadQueue()
                 } catch (e: Exception) {
                     repository.addLog("Background", "Cycle upload échoué: ${e.message}", true)
                 }
@@ -390,13 +401,10 @@ class CallUploadService : Service() {
                     }
 
                     val found = repository.scanFolderIncremental()
-                    if (repository.isLegacyServerMode()) {
-                        repository.autoConnectIfNeeded()
-                        repository.retryFailedUploads()
-                        repository.pollAndExecuteDeleteCommands()
-                    }
+                    repository.autoConnectIfNeeded()
+                    repository.retryFailedUploads()
+                    repository.pollAndExecuteDeleteCommands()
                     triggerUploadQueue()
-                    scheduleHeartbeatAlarm()
                     if (found > 0) repository.addLog("Watchdog", "$found nouveau(x) fichier(s)")
                 } catch (e: Exception) {
                     repository.addLog("Watchdog", "Erreur: ${e.message}", true)
@@ -405,65 +413,7 @@ class CallUploadService : Service() {
         }
     }
 
-    // ── Heartbeat alarm — redémarre même si killed sans callback ──────────────
-    //
-    // CORRECTION Android 12+ : canScheduleExactAlarms() peut retourner false si
-    // l'utilisateur n'a pas accordé SCHEDULE_EXACT_ALARM.
-    // → Fallback sur setAndAllowWhileIdle() (inexact mais garanti)
-
-    private fun scheduleHeartbeatAlarm() {
-        scheduleRestartAlarm(requestCode = HEARTBEAT_REQUEST, delayMs = HEARTBEAT_INTERVAL_MS)
-    }
-
-    private fun scheduleRestartAlarm(requestCode: Int, delayMs: Long) {
-        try {
-            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val intent = Intent(this, ServiceRestartReceiver::class.java).apply {
-                action = RESTART_ACTION
-            }
-            val pi = PendingIntent.getBroadcast(
-                this, requestCode, intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            val triggerAt = SystemClock.elapsedRealtime() + delayMs
-
-            when {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-                    // Android 12+ : vérifier la permission avant d'utiliser setExact
-                    if (alarmManager.canScheduleExactAlarms()) {
-                        alarmManager.setExactAndAllowWhileIdle(
-                            AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
-                    } else {
-                        // Fallback inexact — toujours déclenché, juste avec ±quelques minutes de délai
-                        alarmManager.setAndAllowWhileIdle(
-                            AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
-                    }
-                }
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> {
-                    alarmManager.setExactAndAllowWhileIdle(
-                        AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
-                }
-                else -> {
-                    alarmManager.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
-                }
-            }
-        } catch (_: Exception) {
-            // Dernier recours : alarme inexacte sans exception
-            try {
-                val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-                val intent = Intent(this, ServiceRestartReceiver::class.java).apply { action = RESTART_ACTION }
-                val pi = PendingIntent.getBroadcast(this, requestCode, intent, PendingIntent.FLAG_IMMUTABLE)
-                alarmManager.set(AlarmManager.ELAPSED_REALTIME_WAKEUP,
-                    SystemClock.elapsedRealtime() + 10_000L, pi)
-            } catch (_: Exception) {}
-        }
-    }
-
-    // ── WorkManager : périodique + expedited pour relance immédiate ───────────
-    //
-    // Android 12+ introduit le "Expedited Work" — s'exécute immédiatement même
-    // en battery saver, équivalent à un foreground service temporaire.
-    // Les grandes apps (Signal, Nextcloud, Syncthing) utilisent ce pattern.
+    // ── WorkManager : périodique + reprise immédiate ─────────────────────────
 
     private fun scheduleWorkManagerBackup() {
         try {
@@ -514,6 +464,10 @@ class CallUploadService : Service() {
 
     private fun updateNotification(text: String) {
         try {
+            val now = System.currentTimeMillis()
+            if (text == lastNotificationText && now - lastNotificationAt < 30_000L) return
+            lastNotificationText = text
+            lastNotificationAt = now
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.notify(NOTIFICATION_ID, buildNotification(text))
         } catch (_: Exception) {}
@@ -539,7 +493,7 @@ class CallUploadService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID, "CallSync Monitor", NotificationManager.IMPORTANCE_DEFAULT
+                CHANNEL_ID, "CallSync (silencieux)", NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Surveillance & envoi automatique des enregistrements"
                 setShowBadge(false)

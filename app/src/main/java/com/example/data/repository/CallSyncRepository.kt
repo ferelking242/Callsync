@@ -38,10 +38,6 @@ import java.io.FileInputStream
 import java.io.InputStream
 import java.security.MessageDigest
 import java.util.UUID
-import android.util.Base64
-import org.json.JSONObject
-import java.net.NetworkInterface
-import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -86,14 +82,8 @@ class CallSyncRepository(private val context: Context) {
         if (getPhoneId().isEmpty()) {
             prefs.edit().putString("phone_id", UUID.randomUUID().toString().take(8)).apply()
         }
-        // The server upload path is the reliable default. P2P remains
-        // available as an optional sharing channel from the home screen.
-        if (!prefs.getBoolean("server_mode_migrated", false)) {
-            prefs.edit()
-                .putBoolean("legacy_server_mode", true)
-                .putBoolean("server_mode_migrated", true)
-                .apply()
-        }
+        // Server upload is the only supported delivery path. Keep the
+        // migration marker so existing installations are upgraded safely.
     }
 
     // ── Settings ──────────────────────────────────────────────────────────────
@@ -128,90 +118,6 @@ class CallSyncRepository(private val context: Context) {
     fun setAuthToken(t: String) { prefs.edit().putString("auth_token", t).apply() }
 
     fun getPhoneId(): String = prefs.getString("phone_id", "") ?: ""
-
-    fun getP2pSecret(): String {
-        val current = prefs.getString("p2p_secret", null)
-        if (!current.isNullOrBlank()) return current
-        val created = UUID.randomUUID().toString().replace("-", "")
-        prefs.edit().putString("p2p_secret", created).apply()
-        return created
-    }
-
-    fun getP2pPort(): Int = 43821
-
-    /**
-     * Pairing is intentionally durable.  The QR code is a capability, not a
-     * short-lived login: once the receiver stores it, it can reconnect after
-     * reboot, network changes, or an app update without pairing again.
-     */
-    fun isLegacyServerMode(): Boolean =
-        prefs.getBoolean("legacy_server_mode", true)
-
-    fun setLegacyServerMode(enabled: Boolean) {
-        val wasEnabled = isLegacyServerMode()
-        prefs.edit()
-            .putBoolean("legacy_server_mode", enabled)
-            .apply()
-        if (enabled && !wasEnabled) {
-            prefs.edit().putBoolean("server_index_queue_migrated", false).apply()
-        }
-    }
-
-    fun getPairedPeerIds(): Set<String> =
-        prefs.getStringSet("p2p_paired_peer_ids", emptySet())?.toSet() ?: emptySet()
-
-    fun rememberP2pPeer(peerId: String) {
-        if (peerId.isBlank()) return
-        val peers = getPairedPeerIds().toMutableSet()
-        if (peers.add(peerId)) {
-            prefs.edit().putStringSet("p2p_paired_peer_ids", peers).apply()
-        }
-    }
-
-    fun isP2pPeerPaired(peerId: String): Boolean =
-        peerId.isNotBlank() && getPairedPeerIds().contains(peerId)
-
-    fun getP2pPairingCode(): String {
-        val hosts = getP2pHostCandidates()
-        val host = hosts.firstOrNull() ?: "127.0.0.1"
-        val payload = JSONObject()
-            .put("version", 2)
-            .put("mode", "p2p")
-            .put("id", getPhoneId())
-            .put("name", getDeviceName())
-            .put("host", host)
-            .put("port", getP2pPort())
-            .put("secret", getP2pSecret())
-            .put("persistent", true)
-            .put("candidates", org.json.JSONArray(hosts))
-            // The relay only forwards encrypted/authenticated P2P messages in
-            // memory. It lets two phones connect even when neither one has a
-            // publicly reachable address.
-            .put("relay", getServerUrl().trimEnd('/'))
-            .put("folder", if (isSafFolderSelected()) "SAF" else File(getMonitorFolderPath()).name)
-            .toString()
-        return "callsync://pair/" + Base64.encodeToString(
-            payload.toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
-        )
-    }
-
-    private fun getP2pHostCandidates(): List<String> =
-        try {
-            NetworkInterface.getNetworkInterfaces()?.let { interfaces ->
-                Collections.list(interfaces)
-                    .filter { it.isUp && !it.isLoopback && !it.isVirtual }
-                    .flatMap { Collections.list(it.inetAddresses) }
-                    .filter {
-                        !it.isLoopbackAddress &&
-                            !it.isLinkLocalAddress &&
-                            it.hostAddress?.contains(':') == false
-                    }
-                    .mapNotNull { it.hostAddress }
-                    .distinct()
-            } ?: emptyList()
-        } catch (_: Exception) {
-            emptyList()
-        }
 
     fun getDeviceName(): String {
         val mfr   = Build.MANUFACTURER
@@ -406,7 +312,7 @@ class CallSyncRepository(private val context: Context) {
             }
         }
 
-        val pending = uploadDao.getPendingUploads()
+        val pending = uploadDao.getPendingUploads(System.currentTimeMillis())
         if (pending.isEmpty()) return@withContext 0
 
         // Parallélisme dynamique selon la taille de la queue
@@ -432,7 +338,13 @@ class CallSyncRepository(private val context: Context) {
     private suspend fun uploadSingle(upload: Upload): Boolean {
         if (!sourceExists(upload.path)) {
             addLog("Uploader", "Fichier manquant, marqué FAILED: ${upload.name}", true)
-            uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = "File not found"))
+            uploadDao.updateUpload(
+                upload.copy(
+                    status = "FAILED",
+                    errorMessage = "Fichier introuvable",
+                    nextRetryAt = Long.MAX_VALUE
+                )
+            )
             return false
         }
         return try {
@@ -456,18 +368,32 @@ class CallSyncRepository(private val context: Context) {
                 .toRequestBody("text/plain".toMediaTypeOrNull())
             val sha256Body   = sha256.toRequestBody("text/plain".toMediaTypeOrNull())
 
-            uploadDao.updateUpload(upload.copy(status = "UPLOADING"))
+            uploadDao.updateUpload(upload.copy(status = "UPLOADING", nextRetryAt = 0L))
             val response = getApi().uploadFile(token, filePart, phoneIdBody, deviceBody, versionBody, tsBody, sha256Body)
 
             when {
                 response.isSuccessful -> {
-                    uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
+                    uploadDao.updateUpload(
+                        upload.copy(
+                            status = "COMPLETED",
+                            uploadedAt = System.currentTimeMillis(),
+                            errorMessage = null,
+                            nextRetryAt = 0L
+                        )
+                    )
                     addToServerCache(sha256)
                     addLog("Uploader", "Envoyé: ${upload.name}")
                     true
                 }
                 response.code() == 409 -> {
-                    uploadDao.updateUpload(upload.copy(status = "COMPLETED", uploadedAt = System.currentTimeMillis()))
+                    uploadDao.updateUpload(
+                        upload.copy(
+                            status = "COMPLETED",
+                            uploadedAt = System.currentTimeMillis(),
+                            errorMessage = null,
+                            nextRetryAt = 0L
+                        )
+                    )
                     addToServerCache(sha256)
                     addLog("Uploader", "Ignoré (doublon serveur): ${upload.name}")
                     true
@@ -475,22 +401,49 @@ class CallSyncRepository(private val context: Context) {
                 response.code() == 401 -> {
                     setAuthToken("")
                     val (ok, _) = login()
-                    uploadDao.updateUpload(upload.copy(status = if (ok) "PENDING" else "FAILED",
-                        errorMessage = if (ok) null else "Auth failed"))
+                    uploadDao.updateUpload(
+                        upload.copy(
+                            status = if (ok) "PENDING" else "FAILED",
+                            errorMessage = if (ok) null else "Authentification échouée",
+                            nextRetryAt = if (ok) System.currentTimeMillis() + 30_000L else nextRetryAt(upload)
+                        )
+                    )
                     false
                 }
                 else -> {
                     val errBody = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                    uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = errBody))
+                    val retryable = response.code() == 408 || response.code() == 425 ||
+                        response.code() == 429 || response.code() >= 500
+                    uploadDao.updateUpload(
+                        upload.copy(
+                            status = "FAILED",
+                            errorMessage = errBody,
+                            retryCount = if (retryable) upload.retryCount + 1 else upload.retryCount,
+                            nextRetryAt = if (retryable) nextRetryAt(upload) else Long.MAX_VALUE
+                        )
+                    )
                     addLog("Uploader", "Échec upload (${response.code()}): ${upload.name}", true)
                     false
                 }
             }
         } catch (e: Exception) {
-            uploadDao.updateUpload(upload.copy(status = "FAILED", errorMessage = e.message))
+            uploadDao.updateUpload(
+                upload.copy(
+                    status = "FAILED",
+                    errorMessage = e.message ?: "Erreur réseau",
+                    retryCount = upload.retryCount + 1,
+                    nextRetryAt = nextRetryAt(upload)
+                )
+            )
             addLog("Uploader", "Exception upload: ${upload.name} — ${e.message}", true)
             false
         }
+    }
+
+    private fun nextRetryAt(upload: Upload): Long {
+        val exponent = upload.retryCount.coerceIn(0, 8)
+        val delay = (30_000L shl exponent).coerceAtMost(6 * 60 * 60 * 1_000L)
+        return System.currentTimeMillis() + delay
     }
 
     // ── Server records ────────────────────────────────────────────────────────
@@ -553,8 +506,6 @@ class CallSyncRepository(private val context: Context) {
 
         var addedCount = 0
         for (source in filesToCheck) {
-            if (uploadDao.getUploadByPath(source.path) != null) continue
-
             // SAF providers do not expose FileObserver events. A new recording
             // can therefore be seen while it is still being written. Require
             // two consecutive scans with the same non-zero size before hashing
@@ -566,29 +517,62 @@ class CallSyncRepository(private val context: Context) {
                 if (source.size <= 0L || previous != signature) continue
             }
 
+            val existingByPath = uploadDao.getUploadByPath(source.path)
+            if (existingByPath != null &&
+                source.modifiedAt > 0L &&
+                existingByPath.size == source.size &&
+                existingByPath.modifiedAt == source.modifiedAt
+            ) {
+                continue
+            }
+
             val sha256 = calculateSHA256(source)
+
+            if (existingByPath != null) {
+                if (existingByPath.sha256 == sha256) {
+                    uploadDao.updateUpload(existingByPath.copy(
+                        name = source.name,
+                        size = source.size,
+                        modifiedAt = source.modifiedAt
+                    ))
+                    continue
+                }
+
+                uploadDao.updateUpload(
+                    existingByPath.copy(
+                        sha256 = sha256,
+                        name = source.name,
+                        size = source.size,
+                        modifiedAt = source.modifiedAt,
+                        status = "PENDING",
+                        uploadedAt = null,
+                        retryCount = 0,
+                        errorMessage = null,
+                        nextRetryAt = 0L
+                    )
+                )
+                addedCount++
+                addLog("Scanner", "Fichier modifié remis en queue: ${source.name}")
+                continue
+            }
 
             val existingBySha = uploadDao.getUploadBySha256(sha256)
             if (existingBySha != null && existingBySha.status == "COMPLETED") {
                 uploadDao.insertUpload(
                     Upload(sha256 = sha256, path = source.path, name = source.name,
-                        size = source.size, status = initialIndexedStatus(),
-                        uploadedAt = if (isLegacyServerMode()) null else existingBySha.uploadedAt)
+                        size = source.size, modifiedAt = source.modifiedAt, status = "COMPLETED",
+                        uploadedAt = existingBySha.uploadedAt)
                 )
                 continue
             }
 
             val inserted = uploadDao.insertUpload(
                 Upload(sha256 = sha256, path = source.path, name = source.name,
-                    size = source.size, status = initialIndexedStatus(),
-                    uploadedAt = initialIndexedAt())
+                    size = source.size, modifiedAt = source.modifiedAt, status = "PENDING")
             )
             if (inserted > 0) {
                 addedCount++
-                addLog(
-                    "Scanner",
-                    "Indexé ${if (isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${source.name}"
-                )
+                addLog("Scanner", "Indexé pour envoi serveur: ${source.name}")
             }
         }
 
@@ -622,30 +606,50 @@ class CallSyncRepository(private val context: Context) {
         var alreadyIndexedCount = 0
         for (source in allFiles) {
             val existingByPath = uploadDao.getUploadByPath(source.path)
-            if (existingByPath != null) {
-                // A previous P2P scan stored the file as COMPLETED locally.
-                // Switching to server mode must put that same file back in
-                // the upload queue instead of treating it as invisible.
-                if (isLegacyServerMode() && existingByPath.status == "COMPLETED") {
-                    uploadDao.updateUpload(
-                        existingByPath.copy(
-                            status = "PENDING",
-                            uploadedAt = null,
-                            errorMessage = null
-                        )
-                    )
-                }
+            if (existingByPath != null &&
+                existingByPath.size == source.size &&
+                existingByPath.modifiedAt == source.modifiedAt &&
+                source.modifiedAt > 0L
+            ) {
                 alreadyIndexedCount++
                 continue
             }
             val sha256 = calculateSHA256(source)
 
+            if (existingByPath != null) {
+                if (existingByPath.sha256 == sha256) {
+                    uploadDao.updateUpload(existingByPath.copy(
+                        name = source.name,
+                        size = source.size,
+                        modifiedAt = source.modifiedAt
+                    ))
+                    alreadyIndexedCount++
+                    continue
+                }
+                uploadDao.updateUpload(
+                    existingByPath.copy(
+                        sha256 = sha256,
+                        name = source.name,
+                        size = source.size,
+                        modifiedAt = source.modifiedAt,
+                        status = "PENDING",
+                        uploadedAt = null,
+                        retryCount = 0,
+                        errorMessage = null,
+                        nextRetryAt = 0L
+                    )
+                )
+                addedCount++
+                addLog("Scanner", "Fichier modifié remis en queue: ${source.name}")
+                continue
+            }
+
             val existingBySha = uploadDao.getUploadBySha256(sha256)
             if (existingBySha != null && existingBySha.status == "COMPLETED") {
                 uploadDao.insertUpload(
                     Upload(sha256 = sha256, path = source.path, name = source.name,
-                        size = source.size, status = initialIndexedStatus(),
-                        uploadedAt = if (isLegacyServerMode()) null else existingBySha.uploadedAt)
+                        size = source.size, modifiedAt = source.modifiedAt, status = "COMPLETED",
+                        uploadedAt = existingBySha.uploadedAt)
                 )
                 alreadyIndexedCount++
                 continue
@@ -653,14 +657,13 @@ class CallSyncRepository(private val context: Context) {
 
             val inserted = uploadDao.insertUpload(
                 Upload(sha256 = sha256, path = source.path, name = source.name,
-                    size = source.size, status = initialIndexedStatus(),
-                    uploadedAt = initialIndexedAt())
+                    size = source.size, modifiedAt = source.modifiedAt, status = "PENDING")
             )
             if (inserted > 0) {
                 addedCount++
                 addLog(
                     "Scanner",
-                    "Indexé ${if (isLegacyServerMode()) "pour envoi serveur" else "pour partage pair-à-pair"}: ${source.name}"
+                    "Indexé pour envoi serveur: ${source.name}"
                 )
             } else {
                 alreadyIndexedCount++
@@ -669,12 +672,6 @@ class CallSyncRepository(private val context: Context) {
         addLog("Scanner", "Scan manuel terminé — $addedCount nouveau(x)")
         ScanSummary(allFiles.size, addedCount, alreadyIndexedCount)
     }
-
-    private fun initialIndexedStatus(): String =
-        if (isLegacyServerMode()) "PENDING" else "COMPLETED"
-
-    private fun initialIndexedAt(): Long? =
-        if (isLegacyServerMode()) null else System.currentTimeMillis()
 
     suspend fun queueIndexedFilesForServer() = withContext(Dispatchers.IO) {
         if (prefs.getBoolean("server_index_queue_migrated", false)) return@withContext
@@ -961,7 +958,7 @@ class CallSyncRepository(private val context: Context) {
             if (getAuthToken().isEmpty()) login()
             val token = "Bearer ${getAuthToken()}"
 
-            // GET /delete-commands/{deviceId} returns sha256_list and marks all as done atomically
+            // GET /pending-commands/{deviceId} returns sha256_list and marks all as done atomically
             val response = getApi().getPendingCommands(token, phoneId)
             if (!response.isSuccessful) return@withContext
 

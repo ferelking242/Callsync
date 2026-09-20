@@ -19,7 +19,6 @@ fun MainScreen(viewModel: CallSyncViewModel) {
     val username      by viewModel.username.collectAsState()
     val password      by viewModel.password.collectAsState()
     val monitorFolder by viewModel.monitorFolder.collectAsState()
-    val legacyServerMode by viewModel.legacyServerMode.collectAsState()
 
     Scaffold(
         topBar = {
@@ -59,10 +58,9 @@ fun MainScreen(viewModel: CallSyncViewModel) {
             initialUser   = username,
             initialPass   = password,
             initialFolder = monitorFolder,
-            initialLegacyMode = legacyServerMode,
             onDismiss     = { isSettingsOpen = false },
-            onSave        = { url, user, pass, folder, legacyMode ->
-                viewModel.saveSettings(url, user, pass, folder, legacyMode)
+            onSave        = { url, user, pass, folder ->
+                viewModel.saveSettings(url, user, pass, folder)
             }
         )
     }

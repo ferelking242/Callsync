@@ -14,8 +14,10 @@ data class Upload(
     val path: String,
     val name: String,
     val size: Long,
+    val modifiedAt: Long = 0L,
     val status: String, // "PENDING", "UPLOADING", "COMPLETED", "FAILED"
     val uploadedAt: Long? = null,
     val retryCount: Int = 0,
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val nextRetryAt: Long = 0L
 )

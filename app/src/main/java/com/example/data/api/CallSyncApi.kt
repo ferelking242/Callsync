@@ -56,7 +56,7 @@ data class PurgeResponse(
 )
 
 /**
- * Response from GET /delete-commands/{device_id}.
+ * Response from GET /pending-commands/{device_id}.
  * The server marks all returned commands as done atomically on this call.
  */
 @JsonClass(generateAdapter = true)
@@ -152,7 +152,7 @@ interface CallSyncApi {
      * Poll pending deletion commands for this device.
      * The server marks all returned commands as done atomically.
      */
-    @GET("delete-commands/{deviceId}")
+    @GET("pending-commands/{deviceId}")
     suspend fun getPendingCommands(
         @Header("Authorization") token: String,
         @Path("deviceId") deviceId: String

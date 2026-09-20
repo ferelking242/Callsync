@@ -9,7 +9,6 @@ import com.example.data.model.LogEntry
 import com.example.data.model.Upload
 import com.example.data.repository.CallSyncRepository
 import com.example.service.CallUploadService
-import com.example.service.P2pShareService
 import com.example.update.UpdateManager
 import com.example.update.UpdateState
 import kotlinx.coroutines.delay
@@ -63,8 +62,6 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
     val username      = MutableStateFlow(repository.getUsername())
     val password      = MutableStateFlow(repository.getPassword())
     val monitorFolder = MutableStateFlow(repository.getMonitorFolderPath())
-    val pairingCode   = MutableStateFlow(repository.getP2pPairingCode())
-    val legacyServerMode = MutableStateFlow(repository.isLegacyServerMode())
 
     init {
         viewModelScope.launch { repository.resetStuckUploads() }
@@ -88,11 +85,6 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
         else
             context.startService(intent)
 
-        val p2pIntent = Intent(context, P2pShareService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            context.startForegroundService(p2pIntent)
-        else
-            context.startService(p2pIntent)
     }
 
     // ── Connection ────────────────────────────────────────────────────────────
@@ -130,20 +122,17 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
         user: String,
         pass: String,
         folder: String,
-        legacyMode: Boolean = legacyServerMode.value
     ) {
         repository.setServerUrl(url)
         repository.setUsername(user)
         repository.setPassword(pass)
         repository.setMonitorFolderPath(folder)
-        repository.setLegacyServerMode(legacyMode)
         repository.setAuthToken("")
 
         serverUrl.value     = repository.getServerUrl()
         username.value      = user
         password.value      = pass
         monitorFolder.value = folder
-        legacyServerMode.value = legacyMode
 
         _isConnectionSuccessful.value = null
         _connectionError.value       = ""
@@ -151,12 +140,10 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
         // Restart service with new folder
         startService()
 
-        if (legacyMode) {
-            viewModelScope.launch {
-                repository.queueIndexedFilesForServer()
-                repository.autoConnectIfNeeded()
-                repository.uploadPendingFiles()
-            }
+        viewModelScope.launch {
+            repository.queueIndexedFilesForServer()
+            repository.autoConnectIfNeeded()
+            repository.uploadPendingFiles()
         }
     }
 

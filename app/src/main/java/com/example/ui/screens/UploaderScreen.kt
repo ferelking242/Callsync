@@ -1,33 +1,37 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.text.selection.SelectionContainer
-import com.example.data.model.Upload
 import com.example.service.CallUploadService
 import com.example.ui.viewmodel.CallSyncViewModel
-import com.example.update.UpdateState
-import java.text.SimpleDateFormat
-import java.util.*
 
 @Composable
 fun UploaderScreen(
@@ -35,759 +39,140 @@ fun UploaderScreen(
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit = {}
 ) {
-    val uploads         by viewModel.uploads.collectAsState()
-    val isServiceActive by viewModel.isServiceActive.collectAsState()
-    val lastUploadTime  by viewModel.lastUploadTime.collectAsState()
-    val isOnline        by CallUploadService.isOnline.collectAsState()
-
-    val completed   = remember(uploads) { uploads.count { it.status == "COMPLETED" } }
-    val pending     = remember(uploads) { uploads.count { it.status == "PENDING" } }
-    val failed      = remember(uploads) { uploads.count { it.status == "FAILED" } }
-    val uploading   = remember(uploads) { uploads.count { it.status == "UPLOADING" } }
-    val updateState by viewModel.updateState.collectAsState()
-    val pairingCode by viewModel.pairingCode.collectAsState()
-    val serverUrl by viewModel.serverUrl.collectAsState()
-    val username by viewModel.username.collectAsState()
-    val isConnecting by viewModel.isConnecting.collectAsState()
-    val isConnectionSuccessful by viewModel.isConnectionSuccessful.collectAsState()
-    val connectionError by viewModel.connectionError.collectAsState()
-    val serverMode by viewModel.legacyServerMode.collectAsState()
-    val monitorFolder by viewModel.monitorFolder.collectAsState()
+    val uploads by viewModel.uploads.collectAsState()
+    val isActive by viewModel.isServiceActive.collectAsState()
+    val isOnline by CallUploadService.isOnline.collectAsState()
     val isScanning by viewModel.isScanning.collectAsState()
     val scanMessage by viewModel.scanMessage.collectAsState()
-    val scanError by viewModel.scanError.collectAsState()
-    val monitorFolderLabel = when {
-        monitorFolder.isBlank() -> "Aucun dossier sélectionné"
-        monitorFolder.startsWith("content://", ignoreCase = true) -> "Dossier SAF sélectionné"
-        else -> monitorFolder
-    }
+    val failed = uploads.count { it.status == "FAILED" }
+    val pending = uploads.count { it.status == "PENDING" || it.status == "UPLOADING" }
+    val completed = uploads.count { it.status == "COMPLETED" }
 
     LazyColumn(
         modifier = modifier,
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // ── Update banner ───────────────────────────────────────────────────
-        when (val s = updateState) {
-            is UpdateState.Available -> item {
-                UpdateBanner(
-                    version    = s.version,
-                    onInstall  = { viewModel.downloadAndInstallUpdate(s.downloadUrl) },
-                    isLoading  = false,
-                    progress   = null
-                )
-            }
-            is UpdateState.Downloading -> item {
-                UpdateBanner(
-                    version    = "…",
-                    onInstall  = {},
-                    isLoading  = true,
-                    progress   = s.progress
-                )
-            }
-            is UpdateState.Installing -> item {
-                UpdateBanner(
-                    version    = "…",
-                    onInstall  = {},
-                    isLoading  = true,
-                    progress   = 100
-                )
-            }
-            else -> {}
-        }
-
-        // ── Status row ─────────────────────────────────────────────────────
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                ServiceStatusCard(modifier = Modifier.weight(1f), isActive = isServiceActive)
-                NetworkStatusCard(modifier = Modifier.weight(1f), isOnline = isOnline)
-                P2pStatusCard(modifier = Modifier.weight(1f), isActive = isServiceActive)
-            }
-        }
-
-        item {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                ),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(Icons.Default.Share, contentDescription = null,
-                            modifier = Modifier.size(18.dp))
-                        Text(
-                            "P2P optionnel",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            "pour un autre client",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
-                        )
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Surface(
-                            modifier = Modifier.weight(1f),
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.08f)
-                        ) {
-                            SelectionContainer {
-                                Text(
-                                    pairingCode,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                        val context = LocalContext.current
-                        FilledTonalButton(
-                            onClick = {
-                                val clipboard = context.getSystemService(
-                                    android.content.Context.CLIPBOARD_SERVICE
-                                ) as android.content.ClipboardManager
-                                clipboard.setPrimaryClip(
-                                    android.content.ClipData.newPlainText(
-                                        "Lien CallSync", pairingCode
-                                    )
-                                )
-                                android.widget.Toast.makeText(
-                                    context, "Code copié", android.widget.Toast.LENGTH_SHORT
-                                ).show()
-                            },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                            modifier = Modifier.height(36.dp)
-                        ) {
-                            Icon(Icons.Default.ContentCopy, null, modifier = Modifier.size(15.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Copier", style = MaterialTheme.typography.labelSmall)
-                        }
-                    }
-                }
-            }
-        }
-
-        item {
-            ServerConnectionCard(
-                url = serverUrl,
-                username = username,
-                serverMode = serverMode,
-                isConnecting = isConnecting,
-                isSuccessful = isConnectionSuccessful,
-                error = connectionError,
-                onTest = { viewModel.testConnection() },
-                onOpenSettings = onOpenSettings
-            )
-        }
-
-        // ── Offline banner ──────────────────────────────────────────────────
-        if (!isOnline) {
-            item {
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.WifiOff, null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(16.dp))
-                        Text(
-                            "Hors ligne — les uploads reprendront automatiquement à la reconnexion",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-        }
-
-        // ── Upload in-progress banner ───────────────────────────────────────
-        if (uploading > 0) {
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape    = RoundedCornerShape(12.dp),
-                    colors   = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp
-                        )
+            Card(colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            )) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Icon(Icons.Default.CloudUpload, contentDescription = null)
                         Column {
+                            Text("Envoi automatique", fontWeight = FontWeight.Bold)
                             Text(
-                                "Upload en cours — $uploading fichier(s)",
-                                style = MaterialTheme.typography.labelLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                            Text(
-                                "Envoi parallèle (jusqu'à 16 simultanés)",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                                if (isActive) "Surveillance active" else "En attente du service",
+                                style = MaterialTheme.typography.bodySmall
                             )
                         }
                     }
-                }
-            }
-        }
-
-        // ── Stats row ───────────────────────────────────────────────────────
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                StatChip(modifier = Modifier.weight(1f), label = "Envoyés",    value = "$completed", color = MaterialTheme.colorScheme.secondary)
-                StatChip(modifier = Modifier.weight(1f), label = "En attente", value = "$pending",   color = MaterialTheme.colorScheme.primary)
-                StatChip(modifier = Modifier.weight(1f), label = "Erreurs",    value = "$failed",    color = MaterialTheme.colorScheme.error)
-            }
-        }
-
-        // ── Quick actions ───────────────────────────────────────────────────
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick  = { viewModel.scanNow() },
-                    modifier = Modifier.weight(1f),
-                    enabled  = !isScanning
-                ) {
-                    if (isScanning) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(16.dp))
-                    }
-                    Spacer(Modifier.width(6.dp))
                     Text(
-                        if (isScanning) "Scan en cours…" else "Scanner",
-                        style = MaterialTheme.typography.labelMedium
-                    )
-                }
-                if (failed > 0) {
-                    OutlinedButton(
-                        onClick  = { viewModel.retryFailed() },
-                        modifier = Modifier.weight(1f),
-                        colors   = ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
-                        )
-                    ) {
-                        Icon(Icons.Default.Refresh, null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Réessayer", style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
-        }
-
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    "Dossier analysé : $monitorFolderLabel",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                if (scanMessage.isNotEmpty()) {
-                    Text(
-                        scanMessage,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (scanError) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.secondary
+                        "Les nouveaux fichiers audio sont détectés, stabilisés puis envoyés seuls au serveur.",
+                        style = MaterialTheme.typography.bodySmall
                     )
                 }
             }
         }
-
-        // ── Delete all local files ──────────────────────────────────────────
-        if (uploads.isNotEmpty()) {
-            item { DeleteAllLocalButton(viewModel = viewModel) }
-        }
-
-        // ── Last upload time ────────────────────────────────────────────────
-        if (lastUploadTime != null) {
-            item {
-                val fmt = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(Icons.Default.CheckCircle, null,
-                        modifier = Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.secondary)
-                    Text(
-                        "Dernier envoi : ${fmt.format(Date(lastUploadTime!!))}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.secondary
-                    )
-                }
-            }
-        }
-
-        // ── File list header ────────────────────────────────────────────────
-        if (uploads.isNotEmpty()) {
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Fichiers indexés (${uploads.size})",
-                        style      = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color      = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier   = Modifier.padding(top = 4.dp)
-                    )
-                    TextButton(
-                        onClick  = { viewModel.clearAllUploads() },
-                        modifier = Modifier.testTag("clear_db_uploads_button")
-                    ) {
-                        Icon(Icons.Default.DeleteSweep, null, modifier = Modifier.size(14.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Vider l'index", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-            }
-            items(uploads, key = { it.id }) { upload ->
-                UploadItemRow(upload = upload)
-            }
-        } else {
-            item { EmptyUploaderState() }
-        }
-
-        // ── Clear logs ──────────────────────────────────────────────────────
         item {
-            TextButton(
-                onClick  = { viewModel.clearAllLogs() },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Icon(Icons.Default.ClearAll, null, modifier = Modifier.size(14.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Effacer les logs", style = MaterialTheme.typography.labelSmall)
-            }
-        }
-    }
-}
-
-// ── Sub-components ─────────────────────────────────────────────────────────────
-
-@Composable
-private fun ServerConnectionCard(
-    url: String,
-    username: String,
-    serverMode: Boolean,
-    isConnecting: Boolean,
-    isSuccessful: Boolean?,
-    error: String,
-    onTest: () -> Unit,
-    onOpenSettings: () -> Unit
-) {
-    val statusColor = when (isSuccessful) {
-        true -> Color(0xFF2E7D32)
-        false -> MaterialTheme.colorScheme.error
-        null -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Default.Cloud,
-                    contentDescription = null,
-                    modifier = Modifier.size(19.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(Modifier.width(7.dp))
-                Text(
-                    "Serveur",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    when {
-                        isConnecting -> "Test en cours…"
-                        isSuccessful == true -> "Connecté"
-                        isSuccessful == false -> "Échec"
-                        serverMode -> "Actif"
-                        else -> "À configurer"
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = statusColor,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-            Text(
-                url,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                "Compte : $username",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            if (isSuccessful == false && error.isNotBlank()) {
-                Text(
-                    error,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = onTest,
-                    enabled = !isConnecting,
-                    modifier = Modifier.height(36.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                StatusCard(
+                    modifier = Modifier.weight(1f),
+                    icon = if (isOnline) Icons.Default.CloudUpload else Icons.Default.CloudOff,
+                    title = if (isOnline) "En ligne" else "Hors ligne",
+                    subtitle = "Réseau"
+                )
+                StatusCard(
+                    modifier = Modifier.weight(1f),
+                    icon = Icons.Default.Folder,
+                    title = "$pending en attente",
+                    subtitle = "$completed envoyés"
+                )
+                StatusCard(
+                    modifier = Modifier.weight(1f),
+                    icon = if (failed == 0) Icons.Default.CheckCircle else Icons.Default.ErrorOutline,
+                    title = "$failed erreur(s)",
+                    subtitle = "Reprise automatique"
+                )
+            }
+        }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { viewModel.scanNow() },
+                    enabled = !isScanning,
+                    modifier = Modifier.weight(1f)
                 ) {
-                    if (isConnecting) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(15.dp),
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        Icon(Icons.Default.Wifi, null, modifier = Modifier.size(16.dp))
-                    }
-                    Spacer(Modifier.width(5.dp))
-                    Text("Tester", style = MaterialTheme.typography.labelMedium)
+                    Icon(Icons.Default.Refresh, contentDescription = null)
+                    Text(if (isScanning) "Scan…" else "Scanner")
                 }
                 OutlinedButton(
                     onClick = onOpenSettings,
-                    modifier = Modifier.height(36.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Default.Settings, null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(5.dp))
-                    Text("Configurer", style = MaterialTheme.typography.labelMedium)
+                    Icon(Icons.Default.Settings, contentDescription = null)
+                    Text("Paramètres")
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun ServiceStatusCard(modifier: Modifier, isActive: Boolean) {
-    val containerColor = if (isActive) MaterialTheme.colorScheme.secondaryContainer
-                         else MaterialTheme.colorScheme.surfaceVariant
-    val contentColor   = if (isActive) MaterialTheme.colorScheme.secondary
-                         else MaterialTheme.colorScheme.onSurfaceVariant
-    Card(
-        modifier = modifier,
-        colors   = CardDefaults.cardColors(containerColor = containerColor),
-        shape    = RoundedCornerShape(12.dp)
-    ) {
-        Row(modifier = Modifier.padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(contentColor))
-            Column {
-                Text(if (isActive) "Actif" else "Inactif",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold, color = contentColor)
-                Text("Service", style = MaterialTheme.typography.labelSmall,
-                    color = contentColor.copy(alpha = 0.7f))
-            }
-        }
-    }
-}
-
-@Composable
-private fun NetworkStatusCard(modifier: Modifier, isOnline: Boolean) {
-    val containerColor = if (isOnline) MaterialTheme.colorScheme.secondaryContainer
-                         else MaterialTheme.colorScheme.surfaceVariant
-    val contentColor   = if (isOnline) MaterialTheme.colorScheme.secondary
-                         else MaterialTheme.colorScheme.onSurfaceVariant
-    Card(
-        modifier = modifier,
-        colors   = CardDefaults.cardColors(containerColor = containerColor),
-        shape    = RoundedCornerShape(12.dp)
-    ) {
-        Row(modifier = Modifier.padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Icon(
-                if (isOnline) Icons.Default.Wifi else Icons.Default.WifiOff,
-                null, modifier = Modifier.size(14.dp), tint = contentColor
-            )
-            Column {
-                Text(if (isOnline) "En ligne" else "Hors ligne",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold, color = contentColor)
-                Text("Réseau", style = MaterialTheme.typography.labelSmall,
-                    color = contentColor.copy(alpha = 0.7f))
-            }
-        }
-    }
-}
-
-@Composable
-private fun P2pStatusCard(modifier: Modifier, isActive: Boolean) {
-    val containerColor = if (isActive) MaterialTheme.colorScheme.secondaryContainer
-                         else MaterialTheme.colorScheme.surfaceVariant
-    val contentColor = if (isActive) MaterialTheme.colorScheme.secondary
-                       else MaterialTheme.colorScheme.onSurfaceVariant
-    Card(
-        modifier = modifier,
-        colors   = CardDefaults.cardColors(containerColor = containerColor),
-        shape    = RoundedCornerShape(12.dp)
-    ) {
-        Row(modifier = Modifier.padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(contentColor))
-            Column {
-                Text(if (isActive) "P2P actif" else "P2P arrêté",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold, color = contentColor)
-                Text("Direct + Internet", style = MaterialTheme.typography.labelSmall,
-                    color = contentColor.copy(alpha = 0.7f))
-            }
-        }
-    }
-}
-
-@Composable
-private fun StatChip(modifier: Modifier, label: String, value: String, color: Color) {
-    Card(
-        modifier = modifier,
-        colors   = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        shape    = RoundedCornerShape(10.dp)
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp).fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = color)
-            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-@Composable
-private fun UploadItemRow(upload: Upload) {
-    val (dotColor, statusText) = when (upload.status) {
-        "COMPLETED" -> Pair(MaterialTheme.colorScheme.secondary, "Envoyé ✓")
-        "UPLOADING" -> Pair(MaterialTheme.colorScheme.primary,   "Envoi…")
-        "FAILED"    -> Pair(MaterialTheme.colorScheme.error,     "Erreur")
-        else        -> Pair(MaterialTheme.colorScheme.onSurfaceVariant, "En attente")
-    }
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp, horizontal = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Box(modifier = Modifier.size(7.dp).clip(CircleShape).background(dotColor))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(upload.name, style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (upload.status == "FAILED" && upload.errorMessage != null) {
-                Text(upload.errorMessage, style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-        }
-        Text(statusText, style = MaterialTheme.typography.labelSmall,
-            color = dotColor, fontWeight = FontWeight.SemiBold)
-    }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
-}
-
-@Composable
-private fun EmptyUploaderState() {
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Icon(Icons.Default.Sync, null,
-            modifier = Modifier.size(48.dp),
-            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f))
-        Text("Aucun fichier indexé", style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text("Configurez le dossier dans ⚙ Paramètres\nou attendez la détection automatique",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-            textAlign = TextAlign.Center)
-    }
-}
-
-// ── Update banner ─────────────────────────────────────────────────────────────
-
-@Composable
-private fun UpdateBanner(
-    version:   String,
-    onInstall: () -> Unit,
-    isLoading: Boolean,
-    progress:  Int?
-) {
-    val containerColor = MaterialTheme.colorScheme.primaryContainer
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = containerColor,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                verticalAlignment    = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    Icons.Default.SystemUpdate,
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                    tint     = MaterialTheme.colorScheme.primary
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text  = if (isLoading) "Installation en cours…" else "Mise à jour v$version disponible",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    if (!isLoading) {
-                        Text(
-                            text  = "Appuyez pour mettre à jour automatiquement",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-                if (!isLoading) {
-                    FilledTonalButton(
-                        onClick = onInstall,
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                        modifier = Modifier.height(32.dp)
-                    ) {
-                        Text("Mettre à jour", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-            }
-            if (isLoading && progress != null) {
-                Spacer(Modifier.height(8.dp))
-                LinearProgressIndicator(
-                    progress = { progress / 100f },
-                    modifier = Modifier.fillMaxWidth()
-                )
+        if (scanMessage.isNotBlank()) {
+            item {
                 Text(
-                    text  = if (progress < 100) "Téléchargement… $progress%" else "Installation…",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp)
+                    scanMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+        if (failed > 0) {
+            item {
+                Button(onClick = { viewModel.retryFailed() }, modifier = Modifier.fillMaxWidth()) {
+                    Text("Réessayer les erreurs")
+                }
+            }
+        }
+        item {
+            Text("Derniers fichiers", fontWeight = FontWeight.Bold)
+        }
+        items(uploads.take(50), key = { it.id }) { upload ->
+            UploadRow(upload.name, upload.status, upload.errorMessage)
         }
     }
 }
 
-// ── Delete all local files button ─────────────────────────────────────────────
+@Composable
+private fun StatusCard(
+    modifier: Modifier,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    title: String,
+    subtitle: String
+) {
+    Card(modifier = modifier) {
+        Column(Modifier.padding(10.dp)) {
+            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            Text(subtitle, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
 
 @Composable
-private fun DeleteAllLocalButton(viewModel: CallSyncViewModel) {
-    val isDeletingAll   by viewModel.isDeletingAll.collectAsState()
-    val deleteAllResult by viewModel.deleteAllResult.collectAsState()
-    var showConfirm     by remember { mutableStateOf(false) }
-
-    if (deleteAllResult != null) {
-        LaunchedEffect(deleteAllResult) {
-            kotlinx.coroutines.delay(3000)
-            viewModel.clearDeleteAllResult()
+private fun UploadRow(name: String, status: String, error: String?) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(12.dp)) {
+            Text(name, fontWeight = FontWeight.Medium)
+            Text(
+                when (status) {
+                    "COMPLETED" -> "Envoyé"
+                    "UPLOADING" -> "Envoi en cours"
+                    "PENDING" -> "En attente"
+                    else -> "Échec${if (!error.isNullOrBlank()) ": $error" else ""}"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (status == "FAILED") MaterialTheme.colorScheme.error
+                else Color.Unspecified
+            )
         }
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape    = RoundedCornerShape(10.dp),
-            colors   = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
-        ) {
-            Row(modifier = Modifier.padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(Icons.Default.CheckCircle, null,
-                    modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.secondary)
-                Text("$deleteAllResult fichier(s) supprimé(s) + index vidé",
-                    style = MaterialTheme.typography.bodySmall)
-            }
-        }
-        return
-    }
-
-    OutlinedButton(
-        onClick  = { showConfirm = true },
-        modifier = Modifier.fillMaxWidth(),
-        enabled  = !isDeletingAll,
-        colors   = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-        border   = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f))
-    ) {
-        if (isDeletingAll) {
-            CircularProgressIndicator(modifier = Modifier.size(14.dp),
-                strokeWidth = 2.dp, color = MaterialTheme.colorScheme.error)
-        } else {
-            Icon(Icons.Default.DeleteForever, null, modifier = Modifier.size(16.dp))
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(if (isDeletingAll) "Suppression…" else "Supprimer tout le dossier + index",
-            style = MaterialTheme.typography.labelMedium)
-    }
-
-    if (showConfirm) {
-        AlertDialog(
-            onDismissRequest = { showConfirm = false },
-            title = { Text("Supprimer tous les fichiers ?") },
-            text  = {
-                Text("Tous les enregistrements dans le dossier surveillé seront définitivement " +
-                    "effacés et l'index sera vidé.\n\nLe dossier source partagé ne sera pas supprimé.")
-            },
-            confirmButton = {
-                Button(onClick = { showConfirm = false; viewModel.deleteAllLocal() },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) { Text("Tout supprimer") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showConfirm = false }) { Text("Annuler") }
-            }
-        )
     }
 }
