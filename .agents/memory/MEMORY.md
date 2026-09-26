@@ -1,2 +1,3 @@
+- [Android release workflow](release-workflow.md) — the hosted runner's Android SDK is sufficient; the extra setup action previously failed before Gradle.
 - [Android audio scanning](android-audio-scan.md) — use persisted SAF tree URIs and DocumentsContract recursion; do not reconstruct physical shared-storage paths.
 - [Android CI environment](ci-android-environment.md) — validate Android builds through GitHub Actions when the local SDK is unavailable.
