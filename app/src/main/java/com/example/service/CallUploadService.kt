@@ -8,13 +8,17 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.database.ContentObserver
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
 import android.os.Build
 import android.os.FileObserver
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.work.Constraints
@@ -50,6 +54,8 @@ class CallUploadService : Service() {
     private var uploadJob:   Job? = null
     private var watchdogJob: Job? = null
     private var backgroundPumpJob: Job? = null
+    private var scanJob: Job? = null
+    private var folderContentObserver: ContentObserver? = null
     private var lastNotificationText: String? = null
     private var lastNotificationAt = 0L
 
@@ -61,7 +67,9 @@ class CallUploadService : Service() {
         private const val WORK_NAME_PERIODIC    = "CallSyncPeriodicWorker"
         private const val WORK_NAME_IMMEDIATE   = "CallSyncImmediateWorker"
         private const val WATCHDOG_INTERVAL_MS  = 15 * 60 * 1_000L  // 15 min watchdog coroutine
-        private const val BACKGROUND_PUMP_INTERVAL_MS = 30 * 1_000L
+        // ContentObserver is the primary SAF trigger. This short fallback
+        // covers providers that do not emit reliable document notifications.
+        private const val BACKGROUND_PUMP_INTERVAL_MS = 5 * 1_000L
         // Wake lock renouvelé 2 min avant expiry (toutes les 28 min sur une durée de 30)
         private const val WAKELOCK_DURATION_MS  = 30 * 60 * 1_000L
         private const val WAKELOCK_RENEW_MS     = 28 * 60 * 1_000L
@@ -213,10 +221,11 @@ class CallUploadService : Service() {
         stopObservers()
         val rootPath   = repository.getMonitorFolderPath()
         if (repository.isSafFolderSelected()) {
+            registerSafObserver(Uri.parse(rootPath))
             serviceScope.launch {
                 repository.addLog(
                     "Service",
-                    "Dossier SAF sélectionné — détection par scans périodiques"
+                    "Dossier SAF sélectionné — surveillance instantanée active"
                 )
             }
             return
@@ -256,6 +265,48 @@ class CallUploadService : Service() {
         fileObservers.forEach { it.stopWatching() }
         fileObservers.clear()
         observedDirectories.clear()
+        folderContentObserver?.let {
+            try { contentResolver.unregisterContentObserver(it) } catch (_: Exception) {}
+        }
+        folderContentObserver = null
+        scanJob?.cancel()
+    }
+
+    private fun registerSafObserver(treeUri: Uri) {
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean, uri: Uri?) {
+                scheduleSafScan("Modification détectée")
+            }
+        }
+        folderContentObserver = observer
+        try {
+            contentResolver.registerContentObserver(treeUri, true, observer)
+        } catch (error: Exception) {
+            serviceScope.launch {
+                repository.addLog(
+                    "Service",
+                    "Observateur SAF indisponible: ${error.message} — scan de secours actif",
+                    true
+                )
+            }
+        }
+    }
+
+    private fun scheduleSafScan(reason: String) {
+        scanJob?.cancel()
+        scanJob = serviceScope.launch {
+            delay(500L)
+            try {
+                val found = repository.scanFolderIncremental()
+                if (found > 0) {
+                    repository.addLog("Service", "$reason: $found fichier(s) en queue")
+                    updateNotification("$found fichier(s) détecté(s)…")
+                }
+                triggerUploadQueue()
+            } catch (error: Exception) {
+                repository.addLog("Service", "Scan automatique échoué: ${error.message}", true)
+            }
+        }
     }
 
     private suspend fun handleNewFile(file: File) {
@@ -337,6 +388,7 @@ class CallUploadService : Service() {
         uploadJob = serviceScope.launch {
             repository.autoConnectIfNeeded()
             val uploaded = repository.uploadPendingFiles()
+            if (uploaded > 0) lastUploadTime.value = System.currentTimeMillis()
             updateNotification(
                 if (uploaded > 0) "$uploaded fichier(s) envoyé(s) au serveur"
                 else "Surveillance active — serveur configuré"

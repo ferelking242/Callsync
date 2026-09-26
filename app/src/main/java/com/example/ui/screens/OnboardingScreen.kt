@@ -78,8 +78,17 @@ fun OnboardingScreen(
             try {
                 context.contentResolver.takePersistableUriPermission(uri, flags)
             } catch (_: SecurityException) {
-                // Some providers grant read-only access. The scanner only needs
-                // read access, so keep going when the provider rejects write.
+                // Some providers reject a combined read/write grant. Persist
+                // read access separately so monitoring still works after the
+                // activity and the app process have been closed.
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (_: SecurityException) {
+                    // The provider did not offer a persistable grant.
+                }
             }
             viewModel.saveSettings(
                 viewModel.serverUrl.value,

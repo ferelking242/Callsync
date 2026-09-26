@@ -162,11 +162,14 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
             }
             try {
                 val result = repository.scanFolderManually()
+                repository.autoConnectIfNeeded()
+                val uploaded = repository.uploadPendingFiles()
                 repository.addLog(
                     "Scanner",
                     "Scan manuel: ${result.totalAudioFiles} trouvé(s), " +
                         "${result.newlyIndexed} nouveau(x), " +
-                        "${result.alreadyIndexed} déjà indexé(s)"
+                        "${result.alreadyIndexed} déjà indexé(s), " +
+                        "$uploaded envoyé(s)"
                 )
                 _scanMessage.value = when {
                     !repository.isSafFolderSelected() ->
@@ -177,7 +180,7 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
                         "Scan terminé : ${result.totalAudioFiles} fichier(s) audio trouvé(s), déjà indexé(s)"
                     else ->
                         "Scan terminé : ${result.totalAudioFiles} trouvé(s), " +
-                            "${result.newlyIndexed} ajouté(s) à la file serveur"
+                            "${result.newlyIndexed} ajouté(s), $uploaded envoyé(s)"
                 }
             } catch (error: Exception) {
                 val message = error.message ?: "erreur inconnue"
@@ -186,6 +189,23 @@ class CallSyncViewModel(application: Application) : AndroidViewModel(application
                 _scanMessage.value = "Échec du scan : $message"
             } finally {
                 _isScanning.value = false
+            }
+        }
+    }
+
+    /** Run the same automatic scan/upload pass when the user returns to the app. */
+    fun syncNow() {
+        viewModelScope.launch {
+            try {
+                repository.scanFolderIncremental()
+                repository.autoConnectIfNeeded()
+                repository.uploadPendingFiles()
+            } catch (error: Exception) {
+                repository.addLog(
+                    "Synchronisation",
+                    "Reprise au retour dans l’app échouée: ${error.message}",
+                    true
+                )
             }
         }
     }

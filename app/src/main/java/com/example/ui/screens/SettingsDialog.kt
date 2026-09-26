@@ -47,11 +47,24 @@ fun SettingsDialog(
                 folder = uri.toString()
                 Toast.makeText(context, "Dossier SAF configuré.", Toast.LENGTH_LONG).show()
             } catch (error: SecurityException) {
-                Toast.makeText(
-                    context,
-                    "Impossible de conserver l’autorisation du dossier : ${error.message}",
-                    Toast.LENGTH_LONG
-                ).show()
+                try {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                    folder = uri.toString()
+                    Toast.makeText(
+                        context,
+                        "Dossier configuré en lecture seule.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } catch (readError: SecurityException) {
+                    Toast.makeText(
+                        context,
+                        "Impossible de conserver l’autorisation du dossier : ${readError.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             }
         }
     }

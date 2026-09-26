@@ -1,13 +1,19 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.Alignment
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudOff
@@ -31,6 +37,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.service.CallUploadService
+import com.example.ui.theme.StatusGreen
+import com.example.ui.theme.StatusGreenSubtle
+import com.example.ui.theme.StatusOrange
+import com.example.ui.theme.StatusOrangeSubtle
+import com.example.ui.theme.StatusRed
+import com.example.ui.theme.StatusRedSubtle
 import com.example.ui.viewmodel.CallSyncViewModel
 
 @Composable
@@ -81,19 +93,25 @@ fun UploaderScreen(
                     modifier = Modifier.weight(1f),
                     icon = if (isOnline) Icons.Default.CloudUpload else Icons.Default.CloudOff,
                     title = if (isOnline) "En ligne" else "Hors ligne",
-                    subtitle = "Réseau"
+                    subtitle = "Réseau",
+                    tint = if (isOnline) StatusGreen else StatusRed,
+                    containerColor = if (isOnline) StatusGreenSubtle else StatusRedSubtle
                 )
                 StatusCard(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Default.Folder,
                     title = "$pending en attente",
-                    subtitle = "$completed envoyés"
+                    subtitle = "$completed envoyés",
+                    tint = if (pending == 0) StatusGreen else StatusOrange,
+                    containerColor = if (pending == 0) StatusGreenSubtle else StatusOrangeSubtle
                 )
                 StatusCard(
                     modifier = Modifier.weight(1f),
                     icon = if (failed == 0) Icons.Default.CheckCircle else Icons.Default.ErrorOutline,
                     title = "$failed erreur(s)",
-                    subtitle = "Reprise automatique"
+                    subtitle = if (failed == 0) "Tout est à jour" else "Reprise automatique",
+                    tint = if (failed == 0) StatusGreen else StatusRed,
+                    containerColor = if (failed == 0) StatusGreenSubtle else StatusRedSubtle
                 )
             }
         }
@@ -146,13 +164,38 @@ private fun StatusCard(
     modifier: Modifier,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
-    subtitle: String
+    subtitle: String,
+    tint: Color,
+    containerColor: Color
 ) {
-    Card(modifier = modifier) {
-        Column(Modifier.padding(10.dp)) {
-            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-            Text(title, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
-            Text(subtitle, style = MaterialTheme.typography.labelSmall)
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = containerColor)
+    ) {
+        Column(
+            Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .background(tint.copy(alpha = 0.18f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+            }
+            Text(
+                title,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -162,17 +205,46 @@ private fun UploadRow(name: String, status: String, error: String?) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp)) {
             Text(name, fontWeight = FontWeight.Medium)
-            Text(
-                when (status) {
-                    "COMPLETED" -> "Envoyé"
-                    "UPLOADING" -> "Envoi en cours"
-                    "PENDING" -> "En attente"
-                    else -> "Échec${if (!error.isNullOrBlank()) ": $error" else ""}"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = if (status == "FAILED") MaterialTheme.colorScheme.error
-                else Color.Unspecified
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val isCompleted = status == "COMPLETED"
+                val statusColor = when {
+                    isCompleted -> StatusGreen
+                    status == "FAILED" -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+                Box(
+                    modifier = Modifier
+                        .background(
+                            if (isCompleted) StatusGreenSubtle
+                            else MaterialTheme.colorScheme.surfaceVariant,
+                            RoundedCornerShape(50)
+                        )
+                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        when (status) {
+                            "COMPLETED" -> "Envoyé"
+                            "UPLOADING" -> "Envoi en cours"
+                            "PENDING" -> "En attente"
+                            else -> "Échec"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = statusColor
+                    )
+                }
+                if (status == "FAILED" && !error.isNullOrBlank()) {
+                    Text(
+                        error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 1
+                    )
+                }
+            }
         }
     }
 }
